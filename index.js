@@ -5,6 +5,7 @@
 // - Table names: clinics, appointments, customers, doctors
 // - Column names: full_name, specialty, customer_id, display_name
 // - Handles a single 'appointment_time' timestamp column.
+// - Includes a more robust date query to avoid timezone issues.
 
 const express = require('express');
 const cors = require('cors');
@@ -46,16 +47,16 @@ app.get('/api/clinic-day-schedule', async (req, res) => {
         );
 
         // 2. Get all appointments for that clinic on the given date
-        // Updated to query a single timestamp column by casting it to a date.
+        // **FIXED QUERY**: This is more robust and avoids timezone issues by checking a 24-hour range.
         const appointmentsResult = await db.query(
             `SELECT 
                 appointment_id as id, 
                 doctor_id, 
                 customer_id as patient_id, 
-                appointment_time::time as appointment_time, -- Extract time part
+                to_char(appointment_time, 'HH24:MI:SS') as appointment_time, -- Extract time part as a string
                 status 
              FROM appointments 
-             WHERE clinic_id = $1 AND appointment_time::date = $2::date AND status != 'cancelled'`,
+             WHERE clinic_id = $1 AND appointment_time >= $2::date AND appointment_time < ($2::date + '1 day'::interval) AND status != 'cancelled'`,
             [clinic_id, date]
         );
 
@@ -82,7 +83,7 @@ app.get('/api/pending-appointments', async (req, res) => {
             `SELECT 
                 a.appointment_id as id, 
                 a.appointment_time::date as appointment_date, 
-                a.appointment_time::time as appointment_time, 
+                to_char(a.appointment_time, 'HH24:MI:SS') as appointment_time, 
                 p.display_name as patient_name, 
                 d.full_name as doctor_name
              FROM appointments a
