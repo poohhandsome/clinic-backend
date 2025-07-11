@@ -1,8 +1,4 @@
 
-/* -------------------------------------------------- */
-/* FILE 2: index.js (Main Server) - UPDATED           */
-/* -------------------------------------------------- */
-
 const express = require('express');
 const cors = require('cors');
 const db = require('./db');
@@ -14,6 +10,11 @@ app.use(cors());
 app.use(express.json());
 
 // --- API ENDPOINTS ---
+
+// **NEW** Health Check Endpoint for Uptime Robot
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
 
 // GET all clinics
 app.get('/api/clinics', async (req, res) => {
@@ -199,7 +200,7 @@ app.post('/api/appointments', async (req, res) => {
     res.status(201).json(rows[0]);
   } catch (err) {
     console.error(err.message);
-    res.status(500).send('Server error');
+    res.status(500).send('Server Error');
   }
 });
 

@@ -20,4 +20,3 @@ module.exports = {
   // so other parts of the app can create transactions.
   pool: pool
 };
-
