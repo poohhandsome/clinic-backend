@@ -1,8 +1,8 @@
 /* -------------------------------------------------- */
 /* FILE: index.js (Main Server)                       */
 /* -------------------------------------------------- */
-// This version includes a timezone-safe fix for the
-// 'confirmed-appointments' endpoint.
+// This version updates the 'confirmed-appointments' endpoint
+// to accept a start and end date.
 
 const express = require('express');
 const cors = require('cors');
@@ -90,17 +90,17 @@ app.get('/api/pending-appointments', async (req, res) => {
     }
 });
 
-// GET all confirmed appointments for a clinic on a specific date
+// GET all confirmed appointments for a clinic within a DATE RANGE
 app.get('/api/confirmed-appointments', async (req, res) => {
-    const { clinic_id, date } = req.query;
-    if (!clinic_id || !date) {
-        return res.status(400).json({ msg: 'Clinic ID and date are required' });
+    const { clinic_id, startDate, endDate } = req.query;
+    if (!clinic_id || !startDate || !endDate) {
+        return res.status(400).json({ msg: 'Clinic ID, start date, and end date are required' });
     }
     try {
-        // **THE FIX IS HERE**: Using a 24-hour range query which is safer for timezones.
         const { rows } = await db.query(
             `SELECT 
                 a.appointment_id as id, 
+                to_char(a.appointment_time, 'YYYY-MM-DD') as appointment_date,
                 to_char(a.appointment_time, 'HH24:MI:SS') as booking_time,
                 a.status,
                 p.display_name as patient_name, 
@@ -109,9 +109,9 @@ app.get('/api/confirmed-appointments', async (req, res) => {
              FROM appointments a
              JOIN doctors d ON a.doctor_id = d.doctor_id
              JOIN customers p ON a.customer_id = p.customer_id
-             WHERE a.clinic_id = $1 AND a.status = 'confirmed' AND a.appointment_time >= $2::date AND a.appointment_time < ($2::date + '1 day'::interval)
+             WHERE a.clinic_id = $1 AND a.status = 'confirmed' AND a.appointment_time >= $2::date AND a.appointment_time < ($3::date + '1 day'::interval)
              ORDER BY a.appointment_time`,
-            [clinic_id, date]
+            [clinic_id, startDate, endDate]
         );
         res.json(rows);
     } catch (err) {
