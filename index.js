@@ -99,6 +99,35 @@ app.get('/api/pending-appointments', async (req, res) => {
     }
 });
 
+// GET all confirmed appointments for a clinic on a specific date
+app.get('/api/confirmed-appointments', async (req, res) => {
+    const { clinic_id, date } = req.query;
+    if (!clinic_id || !date) {
+        return res.status(400).json({ msg: 'Clinic ID and date are required' });
+    }
+    try {
+        const { rows } = await db.query(
+            `SELECT 
+                a.appointment_id as id, 
+                to_char(a.appointment_time, 'HH24:MI:SS') as booking_time,
+                a.status,
+                p.display_name as patient_name, 
+                p.phone_number,
+                d.full_name as doctor_name
+             FROM appointments a
+             JOIN doctors d ON a.doctor_id = d.doctor_id
+             JOIN customers p ON a.customer_id = p.customer_id
+             WHERE a.clinic_id = $1 AND a.status = 'confirmed' AND a.appointment_time::date = $2::date
+             ORDER BY a.appointment_time`,
+            [clinic_id, date]
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
 // UPDATE an appointment's status (e.g., to 'confirmed')
 app.patch('/api/appointments/:id', async (req, res) => {
     const { id } = req.params;
