@@ -1,12 +1,11 @@
+
 /* -------------------------------------------------- */
-/* FILE: index.js (Main Server)                       */
+/* FILE 2: index.js (Main Server) - UPDATED           */
 /* -------------------------------------------------- */
-// This version updates the 'confirmed-appointments' endpoint
-// to accept a start and end date.
 
 const express = require('express');
 const cors = require('cors');
-const db = require('./db'); // Assumes db.js is in the same folder
+const db = require('./db');
 
 const app = express();
 const port = 3001;
@@ -46,7 +45,8 @@ app.get('/api/clinic-day-schedule', async (req, res) => {
                 doctor_id, 
                 customer_id as patient_id, 
                 to_char(appointment_time, 'HH24:MI:SS') as appointment_time,
-                status 
+                status,
+                patient_name_at_booking -- Get the snapshot name
              FROM appointments 
              WHERE clinic_id = $1 AND appointment_time >= $2::date AND appointment_time < ($2::date + '1 day'::interval) AND status != 'cancelled'`,
             [clinic_id, date]
@@ -75,11 +75,10 @@ app.get('/api/pending-appointments', async (req, res) => {
                 a.appointment_id as id, 
                 a.appointment_time::date as appointment_date, 
                 to_char(a.appointment_time, 'HH24:MI:SS') as appointment_time, 
-                p.display_name as patient_name, 
+                a.patient_name_at_booking as patient_name, 
                 d.full_name as doctor_name
              FROM appointments a
              JOIN doctors d ON a.doctor_id = d.doctor_id
-             JOIN customers p ON a.customer_id = p.customer_id
              WHERE a.clinic_id = $1 AND a.status = 'pending_confirmation'`,
             [clinic_id]
         );
@@ -103,12 +102,11 @@ app.get('/api/confirmed-appointments', async (req, res) => {
                 to_char(a.appointment_time, 'YYYY-MM-DD') as appointment_date,
                 to_char(a.appointment_time, 'HH24:MI:SS') as booking_time,
                 a.status,
-                p.display_name as patient_name, 
-                p.phone_number,
+                a.patient_name_at_booking as patient_name, 
+                a.patient_phone_at_booking as phone_number,
                 d.full_name as doctor_name
              FROM appointments a
              JOIN doctors d ON a.doctor_id = d.doctor_id
-             JOIN customers p ON a.customer_id = p.customer_id
              WHERE a.clinic_id = $1 AND a.status = 'confirmed' AND a.appointment_time >= $2::date AND a.appointment_time < ($3::date + '1 day'::interval)
              ORDER BY a.appointment_time`,
             [clinic_id, startDate, endDate]
@@ -189,9 +187,14 @@ app.post('/api/appointments', async (req, res) => {
   try {
     const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
     
+    // This is for worker-made appointments. We need to get the patient's name and phone.
+    const { rows: customerRows } = await db.query('SELECT display_name, phone_number FROM customers WHERE customer_id = $1', [patient_id]);
+    const patientName = customerRows.length > 0 ? customerRows[0].display_name : 'N/A';
+    const patientPhone = customerRows.length > 0 ? customerRows[0].phone_number : 'N/A';
+
     const { rows } = await db.query(
-      'INSERT INTO appointments (customer_id, doctor_id, clinic_id, appointment_time, status) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [patient_id, doctor_id, clinic_id, appointmentTimestamp, status || 'confirmed']
+      'INSERT INTO appointments (customer_id, doctor_id, clinic_id, appointment_time, status, patient_name_at_booking, patient_phone_at_booking) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [patient_id, doctor_id, clinic_id, appointmentTimestamp, status || 'confirmed', patientName, patientPhone]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -201,5 +204,5 @@ app.post('/api/appointments', async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Backend server running on http://localhost:${port}`);
+  console.log(`✅ Server started on port ${port}`);
 });

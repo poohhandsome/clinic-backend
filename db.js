@@ -1,7 +1,7 @@
+
 /* -------------------------------------------------- */
 /* FILE 1: db.js (Database Connection) - UPDATED      */
 /* -------------------------------------------------- */
-// Create or replace the file 'db.js' and paste this code into it.
 
 const { Pool } = require('pg');
 require('dotenv').config();
@@ -20,3 +20,4 @@ module.exports = {
   // so other parts of the app can create transactions.
   pool: pool
 };
+
