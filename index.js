@@ -1,23 +1,99 @@
 
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const db = require('./db');
 
 const app = express();
-const port = 3001;
+const port = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
+// --- Authentication Routes ---
 
+// **NEW**: Register a new worker (for setup purposes)
+app.post('/api/register', async (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ msg: 'Please enter all fields' });
+    }
+    try {
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash(password, salt);
+        
+        const { rows } = await db.query(
+            'INSERT INTO workers (username, password_hash) VALUES ($1, $2) RETURNING id, username',
+            [username, passwordHash]
+        );
+        res.status(201).json({ user: rows[0] });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).json({ msg: 'Server error, username may already exist.' });
+    }
+});
+
+// **NEW**: Login a worker
+app.post('/api/login', async (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ msg: 'Please enter all fields' });
+    }
+    try {
+        const { rows } = await db.query('SELECT * FROM workers WHERE username = $1', [username]);
+        if (rows.length === 0) {
+            return res.status(400).json({ msg: 'Invalid credentials' });
+        }
+        const user = rows[0];
+
+        const isMatch = await bcrypt.compare(password, user.password_hash);
+        if (!isMatch) {
+            return res.status(400).json({ msg: 'Invalid credentials' });
+        }
+
+        const payload = { user: { id: user.id, username: user.username } };
+        jwt.sign(
+            payload,
+            process.env.JWT_SECRET, // Make sure to add this to your .env file!
+            { expiresIn: '12h' }, // Token expires in 12 hours
+            (err, token) => {
+                if (err) throw err;
+                res.json({ token, user: { id: user.id, username: user.username } });
+            }
+        );
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+// --- Authentication Middleware ---
+// This function will run before any protected route
+const authMiddleware = (req, res, next) => {
+    const authHeader = req.header('Authorization');
+    if (!authHeader) {
+        return res.status(401).json({ msg: 'No token, authorization denied' });
+    }
+
+    try {
+        const token = authHeader.split(' ')[1]; // Format: "Bearer TOKEN"
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded.user;
+        next();
+    } catch (err) {
+        res.status(401).json({ msg: 'Token is not valid' });
+    }
+};
+
+// --- Protected API Endpoints ---
 // --- API ENDPOINTS ---
 
 // **NEW** Health Check Endpoint for Uptime Robot
-app.get('/api/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
+app.get('/api/health', (req, res) => res.status(200).json({ status: 'ok' }));
 
 // GET all clinics
-app.get('/api/clinics', async (req, res) => {
+app.get('/api/clinics', authMiddleware, async (req, res) => {
   try {
     const { rows } = await db.query('SELECT clinic_id as id, name FROM clinics ORDER BY name');
     res.json(rows);
@@ -28,7 +104,7 @@ app.get('/api/clinics', async (req, res) => {
 });
 
 // GET all data for the DAILY view
-app.get('/api/clinic-day-schedule', async (req, res) => {
+app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     const { clinic_id, date } = req.query;
     if (!clinic_id || !date) {
         return res.status(400).json({ msg: 'Clinic ID and date are required' });
@@ -65,7 +141,7 @@ app.get('/api/clinic-day-schedule', async (req, res) => {
 });
 
 // GET all pending appointments for a clinic
-app.get('/api/pending-appointments', async (req, res) => {
+app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     const { clinic_id } = req.query;
     if (!clinic_id) {
         return res.status(400).json({ msg: 'Clinic ID is required' });
@@ -91,7 +167,7 @@ app.get('/api/pending-appointments', async (req, res) => {
 });
 
 // GET all confirmed appointments for a clinic within a DATE RANGE
-app.get('/api/confirmed-appointments', async (req, res) => {
+app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
     const { clinic_id, startDate, endDate } = req.query;
     if (!clinic_id || !startDate || !endDate) {
         return res.status(400).json({ msg: 'Clinic ID, start date, and end date are required' });
@@ -120,7 +196,7 @@ app.get('/api/confirmed-appointments', async (req, res) => {
 });
 
 // UPDATE an appointment's status (e.g., to 'confirmed')
-app.patch('/api/appointments/:id', async (req, res) => {
+app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
     try {
@@ -137,7 +213,7 @@ app.patch('/api/appointments/:id', async (req, res) => {
 
 
 // GET a doctor's availability schedule
-app.get('/api/doctor-availability/:doctor_id', async (req, res) => {
+app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     try {
         const { rows } = await db.query(
@@ -152,7 +228,7 @@ app.get('/api/doctor-availability/:doctor_id', async (req, res) => {
 });
 
 // POST (save) a doctor's full weekly availability
-app.post('/api/doctor-availability/:doctor_id', async (req, res) => {
+app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     const { availability } = req.body;
 
@@ -180,7 +256,7 @@ app.post('/api/doctor-availability/:doctor_id', async (req, res) => {
 });
 
 // POST (create) a new appointment
-app.post('/api/appointments', async (req, res) => {
+app.post('/api/appointments', authMiddleware, async (req, res) => {
   const { patient_id, doctor_id, clinic_id, appointment_date, appointment_time, status } = req.body;
   if (!patient_id || !doctor_id || !clinic_id || !appointment_date || !appointment_time) {
       return res.status(400).json({ msg: 'Missing required appointment details.' });
