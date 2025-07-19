@@ -96,7 +96,7 @@ app.get('/api/clinics', authMiddleware, async (req, res) => {
   }
 });
 
-// GET all data for the DAILY view
+
 app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     const { clinic_id, date } = req.query;
     if (!clinic_id || !date) {
@@ -104,21 +104,15 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     }
 
     try {
-        // First, get ALL doctors for the clinic for the "Manage Schedules" page
         const allDoctorsResult = await db.query(
             'SELECT doctor_id as id, full_name as name, specialty FROM doctors WHERE clinic_id = $1 ORDER BY full_name',
             [clinic_id]
         );
 
-        // **THE FIX IS HERE**: Now, get only the doctors WORKING on the specified day
-        const dayOfWeek = new Date(date).getDay(); // Sunday = 0, Monday = 1, etc.
+        const dayOfWeek = new Date(date).getDay();
         const workingDoctorsResult = await db.query(
             `SELECT 
-                d.doctor_id as id, 
-                d.full_name as name, 
-                d.specialty,
-                da.start_time,
-                da.end_time
+                d.doctor_id as id, d.full_name as name, d.specialty, da.start_time, da.end_time
              FROM doctors d
              JOIN doctor_availability da ON d.doctor_id = da.doctor_id
              WHERE d.clinic_id = $1 AND da.day_of_week = $2
@@ -128,21 +122,18 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
 
         const appointmentsResult = await db.query(
             `SELECT 
-                appointment_id as id, 
-                doctor_id, 
-                customer_id as patient_id, 
-                to_char(appointment_time, 'HH24:MI') as appointment_time,
-                status,
-                patient_name_at_booking
-             FROM appointments 
-             WHERE clinic_id = $1 AND appointment_time >= $2::date AND appointment_time < ($2::date + '1 day'::interval) AND status != 'cancelled'`,
+                a.appointment_id as id, a.doctor_id, a.customer_id as patient_id, 
+                to_char(a.appointment_time, 'HH24:MI') as appointment_time,
+                a.status,
+                COALESCE(a.patient_name_at_booking, c.display_name) as patient_name_at_booking
+             FROM appointments a
+             LEFT JOIN customers c ON a.customer_id = c.customer_id
+             WHERE a.clinic_id = $1 AND a.appointment_time >= $2::date AND a.appointment_time < ($2::date + '1 day'::interval) AND a.status != 'cancelled'`,
             [clinic_id, date]
         );
 
         res.json({
-            // This contains only the doctors working on the selected day
             doctors: workingDoctorsResult.rows,
-            // This contains ALL doctors for the clinic, useful for other parts of the app
             all_doctors_in_clinic: allDoctorsResult.rows,
             appointments: appointmentsResult.rows,
         });
@@ -153,6 +144,7 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     }
 });
 
+// **FIX IS HERE**: Updated query to join with customers table
 app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     const { clinic_id } = req.query;
     if (!clinic_id) {
@@ -164,10 +156,11 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
                 a.appointment_id as id, 
                 a.appointment_time::date as appointment_date, 
                 to_char(a.appointment_time, 'HH24:MI:SS') as appointment_time, 
-                a.patient_name_at_booking as patient_name, 
+                COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown Patient') as patient_name, 
                 d.full_name as doctor_name
              FROM appointments a
              JOIN doctors d ON a.doctor_id = d.doctor_id
+             LEFT JOIN customers c on a.customer_id = c.customer_id
              WHERE a.clinic_id = $1 AND a.status = 'pending_confirmation'`,
             [clinic_id]
         );
@@ -178,6 +171,7 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     }
 });
 
+// **FIX IS HERE**: Updated query to join with customers table
 app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
     const { clinic_id, startDate, endDate } = req.query;
     if (!clinic_id || !startDate || !endDate) {
@@ -190,11 +184,12 @@ app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
                 to_char(a.appointment_time, 'YYYY-MM-DD') as appointment_date,
                 to_char(a.appointment_time, 'HH24:MI:SS') as booking_time,
                 a.status,
-                a.patient_name_at_booking as patient_name, 
-                a.patient_phone_at_booking as phone_number,
+                COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown Patient') as patient_name, 
+                COALESCE(a.patient_phone_at_booking, c.phone_number, 'N/A') as phone_number,
                 d.full_name as doctor_name
              FROM appointments a
              JOIN doctors d ON a.doctor_id = d.doctor_id
+             LEFT JOIN customers c ON a.customer_id = c.customer_id
              WHERE a.clinic_id = $1 AND a.status = 'confirmed' AND a.appointment_time >= $2::date AND a.appointment_time < ($3::date + '1 day'::interval)
              ORDER BY a.appointment_time`,
             [clinic_id, startDate, endDate]
