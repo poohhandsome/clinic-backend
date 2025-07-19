@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -11,9 +10,9 @@ const port = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
+
 // --- Authentication Routes ---
 
-// **NEW**: Register a new worker (for setup purposes)
 app.post('/api/register', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
@@ -34,7 +33,6 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// **NEW**: Login a worker
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
@@ -55,8 +53,8 @@ app.post('/api/login', async (req, res) => {
         const payload = { user: { id: user.id, username: user.username } };
         jwt.sign(
             payload,
-            process.env.JWT_SECRET, // Make sure to add this to your .env file!
-            { expiresIn: '12h' }, // Token expires in 12 hours
+            process.env.JWT_SECRET,
+            { expiresIn: '12h' },
             (err, token) => {
                 if (err) throw err;
                 res.json({ token, user: { id: user.id, username: user.username } });
@@ -69,15 +67,13 @@ app.post('/api/login', async (req, res) => {
 });
 
 // --- Authentication Middleware ---
-// This function will run before any protected route
 const authMiddleware = (req, res, next) => {
     const authHeader = req.header('Authorization');
     if (!authHeader) {
         return res.status(401).json({ msg: 'No token, authorization denied' });
     }
-
     try {
-        const token = authHeader.split(' ')[1]; // Format: "Bearer TOKEN"
+        const token = authHeader.split(' ')[1];
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         req.user = decoded.user;
         next();
@@ -87,12 +83,9 @@ const authMiddleware = (req, res, next) => {
 };
 
 // --- Protected API Endpoints ---
-// --- API ENDPOINTS ---
 
-// **NEW** Health Check Endpoint for Uptime Robot
 app.get('/api/health', (req, res) => res.status(200).json({ status: 'ok' }));
 
-// GET all clinics
 app.get('/api/clinics', authMiddleware, async (req, res) => {
   try {
     const { rows } = await db.query('SELECT clinic_id as id, name FROM clinics ORDER BY name');
@@ -111,9 +104,26 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     }
 
     try {
-        const doctorsResult = await db.query(
+        // First, get ALL doctors for the clinic for the "Manage Schedules" page
+        const allDoctorsResult = await db.query(
             'SELECT doctor_id as id, full_name as name, specialty FROM doctors WHERE clinic_id = $1 ORDER BY full_name',
             [clinic_id]
+        );
+
+        // **THE FIX IS HERE**: Now, get only the doctors WORKING on the specified day
+        const dayOfWeek = new Date(date).getDay(); // Sunday = 0, Monday = 1, etc.
+        const workingDoctorsResult = await db.query(
+            `SELECT 
+                d.doctor_id as id, 
+                d.full_name as name, 
+                d.specialty,
+                da.start_time,
+                da.end_time
+             FROM doctors d
+             JOIN doctor_availability da ON d.doctor_id = da.doctor_id
+             WHERE d.clinic_id = $1 AND da.day_of_week = $2
+             ORDER BY d.full_name`,
+            [clinic_id, dayOfWeek]
         );
 
         const appointmentsResult = await db.query(
@@ -121,16 +131,19 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
                 appointment_id as id, 
                 doctor_id, 
                 customer_id as patient_id, 
-                to_char(appointment_time, 'HH24:MI:SS') as appointment_time,
+                to_char(appointment_time, 'HH24:MI') as appointment_time,
                 status,
-                patient_name_at_booking -- Get the snapshot name
+                patient_name_at_booking
              FROM appointments 
              WHERE clinic_id = $1 AND appointment_time >= $2::date AND appointment_time < ($2::date + '1 day'::interval) AND status != 'cancelled'`,
             [clinic_id, date]
         );
 
         res.json({
-            doctors: doctorsResult.rows,
+            // This contains only the doctors working on the selected day
+            doctors: workingDoctorsResult.rows,
+            // This contains ALL doctors for the clinic, useful for other parts of the app
+            all_doctors_in_clinic: allDoctorsResult.rows,
             appointments: appointmentsResult.rows,
         });
 
@@ -140,7 +153,6 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     }
 });
 
-// GET all pending appointments for a clinic
 app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     const { clinic_id } = req.query;
     if (!clinic_id) {
@@ -166,7 +178,6 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     }
 });
 
-// GET all confirmed appointments for a clinic within a DATE RANGE
 app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
     const { clinic_id, startDate, endDate } = req.query;
     if (!clinic_id || !startDate || !endDate) {
@@ -195,7 +206,6 @@ app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
     }
 });
 
-// UPDATE an appointment's status (e.g., to 'confirmed')
 app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
@@ -211,8 +221,6 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     }
 });
 
-
-// GET a doctor's availability schedule
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     try {
@@ -227,11 +235,9 @@ app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) 
     }
 });
 
-// POST (save) a doctor's full weekly availability
 app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     const { availability } = req.body;
-
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
@@ -255,7 +261,6 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
     }
 });
 
-// POST (create) a new appointment
 app.post('/api/appointments', authMiddleware, async (req, res) => {
   const { patient_id, doctor_id, clinic_id, appointment_date, appointment_time, status } = req.body;
   if (!patient_id || !doctor_id || !clinic_id || !appointment_date || !appointment_time) {
@@ -263,8 +268,6 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
   }
   try {
     const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
-    
-    // This is for worker-made appointments. We need to get the patient's name and phone.
     const { rows: customerRows } = await db.query('SELECT display_name, phone_number FROM customers WHERE customer_id = $1', [patient_id]);
     const patientName = customerRows.length > 0 ? customerRows[0].display_name : 'N/A';
     const patientPhone = customerRows.length > 0 ? customerRows[0].phone_number : 'N/A';
