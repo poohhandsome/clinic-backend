@@ -122,18 +122,17 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
         `, [clinic_id, dayOfWeek]);
 
         const appointmentsResult = await db.query(`
-            SELECT a.appointment_id as id,
-                   a.doctor_id,
-                   a.patient_id,
-                   TO_CHAR(a.appointment_time, 'HH24:MI') as appointment_time,
-                   TO_CHAR(a.appointment_time + INTERVAL '30 minutes', 'HH24:MI') as end_time,
-                   a.status,
-                   COALESCE(a.patient_name_at_booking, c.name) as patient_name_at_booking
-            FROM appointments a
-            LEFT JOIN customers c ON a.patient_id = c.customer_id
-            WHERE a.clinic_id = $1 AND a.appointment_date = $2 AND a.status = 'confirmed'
-        `, [clinic_id, date]);
-
+    SELECT a.appointment_id as id,
+           a.doctor_id,
+           a.customer_id,
+           TO_CHAR(a.appointment_time, 'HH24:MI') as appointment_time,
+           TO_CHAR(a.appointment_time + INTERVAL '30 minutes', 'HH24:MI') as end_time,
+           a.status,
+           COALESCE(a.patient_name_at_booking, c.name) as patient_name_at_booking
+    FROM appointments a
+    LEFT JOIN customers c ON a.customer_id = c.customer_id
+    WHERE a.clinic_id = $1 AND a.appointment_date = $2 AND a.status = 'confirmed'
+`, [clinic_id, date]);
         res.json({
             doctors: workingDoctorsResult.rows,
             all_doctors_in_clinic: allDoctorsResult.rows,
@@ -218,7 +217,7 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
                 d.full_name AS doctor_name 
             FROM appointments a 
             JOIN doctors d ON a.doctor_id = d.doctor_id 
-            LEFT JOIN customers c ON a.patient_id = c.customer_id 
+            LEFT JOIN customers c ON a.customer_id = c.customer_id 
             WHERE a.clinic_id = $1 
               AND a.status = 'pending_confirmation'
         `, [clinic_id]);
