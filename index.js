@@ -110,7 +110,7 @@ app.post('/api/doctors', authMiddleware, async (req, res) => {
         const insertPromises = clinicIds.map(clinicId => {
             return client.query(
                 'INSERT INTO doctors (full_name, specialty, clinic_id) VALUES ($1, $2, $3)',
-                [fullName, specialty || null, clinicId]
+                [fullName.trim(), specialty || null, clinicId]
             );
         });
 
@@ -393,7 +393,91 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
+app.get('/api/special-schedules/:doctor_id', authMiddleware, async (req, res) => {
+    const { doctor_id } = req.params;
+    try {
+        const query = `
+            SELECT
+                ss.id,
+                ss.doctor_id,
+                ss.clinic_id,
+                c.name as clinic_name,
+                TO_CHAR(ss.schedule_date, 'YYYY-MM-DD') as schedule_date,
+                ss.start_time,
+                ss.end_time,
+                ss.is_available
+            FROM special_schedules ss
+            JOIN clinics c ON ss.clinic_id = c.clinic_id
+            WHERE ss.doctor_id IN (
+                SELECT d2.doctor_id FROM doctors d2 WHERE d2.full_name = (
+                    SELECT d3.full_name FROM doctors d3 WHERE d3.doctor_id = $1
+                )
+            )
+            ORDER BY ss.schedule_date DESC;
+        `;
+        const { rows } = await db.query(query, [doctor_id]);
+        res.json(rows);
+    } catch (err) {
+        console.error("Error fetching special schedules:", err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
 
+// Add a new special schedule
+app.post('/api/special-schedules', authMiddleware, async (req, res) => {
+    const { doctor_id, clinic_id, schedule_date, start_time, end_time, is_available } = req.body;
+    
+    if (!doctor_id || !clinic_id || !schedule_date) {
+        return res.status(400).json({ message: 'Doctor, clinic, and date are required.' });
+    }
+
+    const client = await db.pool.connect();
+    try {
+        // Find the specific doctor_id for the given doctor name and clinic
+        const nameResult = await client.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [doctor_id]);
+        if (nameResult.rows.length === 0) {
+            return res.status(404).send({ message: 'Doctor not found.' });
+        }
+        const doctorName = nameResult.rows[0].full_name;
+
+        const specificDoctorIdResult = await client.query(
+            'SELECT doctor_id FROM doctors WHERE full_name = $1 AND clinic_id = $2',
+            [doctorName, clinic_id]
+        );
+        if (specificDoctorIdResult.rows.length === 0) {
+            return res.status(404).send({ message: 'Doctor is not assigned to this clinic.' });
+        }
+        const specificDoctorId = specificDoctorIdResult.rows[0].doctor_id;
+
+        const { rows } = await client.query(
+            `INSERT INTO special_schedules (doctor_id, clinic_id, schedule_date, start_time, end_time, is_available)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING id, doctor_id, clinic_id, TO_CHAR(schedule_date, 'YYYY-MM-DD') as schedule_date, start_time, end_time, is_available`,
+            [specificDoctorId, clinic_id, schedule_date, start_time, end_time, is_available]
+        );
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        console.error("Error adding special schedule:", err.message);
+        res.status(500).json({ message: 'Server Error' });
+    } finally {
+        client.release();
+    }
+});
+
+// Delete a special schedule
+app.delete('/api/special-schedules/:id', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await db.query('DELETE FROM special_schedules WHERE id = $1 RETURNING id', [id]);
+        if (result.rowCount === 0) {
+            return res.status(404).json({ message: 'Schedule not found.' });
+        }
+        res.status(200).json({ message: 'Special schedule deleted successfully.' });
+    } catch (err) {
+        console.error("Error deleting special schedule:", err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
 app.listen(port, () => {
     console.log(`✅ Server started on port ${port}`);
 });
