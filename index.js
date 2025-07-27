@@ -96,7 +96,92 @@ app.get('/api/doctors', authMiddleware, async (req, res) => {
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
+app.post('/api/doctors', authMiddleware, async (req, res) => {
+    const { fullName, specialty, clinicIds } = req.body;
+    if (!fullName || !clinicIds || !Array.isArray(clinicIds) || clinicIds.length === 0) {
+        return res.status(400).json({ message: 'Full name and at least one clinic ID are required.' });
+    }
 
+    const client = await db.pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // Create a separate row for each clinic assignment
+        const insertPromises = clinicIds.map(clinicId => {
+            return client.query(
+                'INSERT INTO doctors (full_name, specialty, clinic_id) VALUES ($1, $2, $3)',
+                [fullName, specialty || null, clinicId]
+            );
+        });
+
+        await Promise.all(insertPromises);
+        await client.query('COMMIT');
+        res.status(201).json({ message: `Doctor '${fullName}' created successfully.` });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("Error in POST /api/doctors:", err.message);
+        if (err.code === '23505') { // Handles unique constraint violation
+            return res.status(409).json({ message: 'This doctor is already assigned to one of the selected clinics.' });
+        }
+        res.status(500).json({ message: err.message || 'Server Error' });
+    } finally {
+        client.release();
+    }
+});
+app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
+    const { id } = req.params; // This is a representative ID
+    const { clinicIds, specialty } = req.body;
+
+    if (!Array.isArray(clinicIds)) {
+        return res.status(400).json({ message: 'clinicIds must be an array.' });
+    }
+
+    const client = await db.pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // First, get the doctor's full name from the representative ID
+        const nameResult = await client.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [id]);
+        if (nameResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: 'Doctor not found.' });
+        }
+        const fullName = nameResult.rows[0].full_name;
+
+        // Update specialty on all existing records for this doctor
+        await client.query('UPDATE doctors SET specialty = $1 WHERE full_name = $2', [specialty, fullName]);
+
+        // Get all current clinic assignments for this doctor
+        const currentAssignmentsResult = await client.query('SELECT doctor_id, clinic_id FROM doctors WHERE full_name = $1', [fullName]);
+        const currentClinicIds = currentAssignmentsResult.rows.map(a => a.clinic_id);
+        
+        // Find clinics to add and doctor_ids to remove
+        const clinicsToAdd = clinicIds.filter(cid => !currentClinicIds.includes(cid));
+        const doctorIdsToRemove = currentAssignmentsResult.rows
+            .filter(a => !clinicIds.includes(a.clinic_id))
+            .map(a => a.doctor_id);
+
+        // Remove old assignments
+        if (doctorIdsToRemove.length > 0) {
+            await client.query('DELETE FROM doctors WHERE doctor_id = ANY($1::int[])', [doctorIdsToRemove]);
+        }
+
+        // Add new assignments
+        const addPromises = clinicsToAdd.map(clinicId => {
+            return client.query('INSERT INTO doctors (full_name, specialty, clinic_id) VALUES ($1, $2, $3)', [fullName, specialty, clinicId]);
+        });
+        await Promise.all(addPromises);
+
+        await client.query('COMMIT');
+        res.json({ message: `Doctor '${fullName}' assignments updated.` });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("Error in PUT /api/doctors/:id/clinics:", err.message);
+        res.status(500).json({ message: err.message || 'Server Error' });
+    } finally {
+        client.release();
+    }
+});
 
 // This endpoint gets the schedule, which is now simple and does NOT involve special schedules.
 app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
