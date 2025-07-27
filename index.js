@@ -77,8 +77,7 @@ app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
         const query = `
             WITH DoctorClinicPairs AS (
                 SELECT DISTINCT doctor_id, clinic_id FROM doctor_availability
-                UNION
-                SELECT DISTINCT doctor_id, clinic_id FROM special_schedules WHERE is_available = TRUE
+        
             )
             SELECT
                 d.doctor_id AS id,
