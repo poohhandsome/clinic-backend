@@ -72,11 +72,10 @@ app.get('/api/clinics', authMiddleware, async (req, res) => {
 });
 
 // ***************************************************************
-// ** NEW & CORRECTED ENDPOINT #1: Get unique doctors           **
+// ** NEW & CORRECTED: Get unique doctors using correct schema  **
 // ***************************************************************
 app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
     try {
-        // This query now correctly joins tables based on your schema images.
         const query = `
             SELECT
                 d.doctor_id AS id,
@@ -96,15 +95,25 @@ app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
     }
 });
 
-
+// *****************************************************************
+// ** COMPLETELY REWRITTEN: To match your confirmed database schema **
+// *****************************************************************
 app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     const { clinic_id, date } = req.query;
     if (!clinic_id || !date) return res.status(400).json({ msg: 'Clinic ID and date are required' });
+
     try {
         const dayOfWeek = new Date(date).getDay();
-        const allDoctorsResult = await db.query('SELECT d.doctor_id as id, d.full_name as name FROM doctors d JOIN doctor_clinics dc ON d.doctor_id = dc.doctor_id WHERE dc.clinic_id = $1 ORDER BY d.full_name', [clinic_id]);
+
+        const allDoctorsInClinicQuery = `
+            SELECT d.doctor_id as id, d.full_name as name, d.specialty
+            FROM doctors d
+            JOIN doctor_clinics dc ON d.doctor_id = dc.doctor_id
+            WHERE dc.clinic_id = $1
+            ORDER BY d.full_name
+        `;
         
-        const workingDoctorsResult = await db.query(`
+        const workingDoctorsQuery = `
             WITH regular_schedule AS (
                 SELECT da.doctor_id, da.start_time, da.end_time
                 FROM doctor_availability da
@@ -115,25 +124,46 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
                 FROM special_schedules
                 WHERE clinic_id = $1 AND schedule_date = $3
             ),
-            all_clinic_doctors AS (
+            clinic_doctors AS (
                 SELECT doctor_id, full_name, specialty from doctors d
                 JOIN doctor_clinics dc ON d.doctor_id = dc.doctor_id
                 WHERE dc.clinic_id = $1
             )
             SELECT
-                acd.doctor_id as id, acd.full_name as name, acd.specialty,
+                cd.doctor_id as id, cd.full_name as name, cd.specialty,
                 COALESCE(ss.start_time, rs.start_time) as start_time,
                 COALESCE(ss.end_time, rs.end_time) as end_time
-            FROM all_clinic_doctors acd
-            LEFT JOIN regular_schedule rs ON acd.doctor_id = rs.doctor_id
-            LEFT JOIN special_schedule ss ON acd.doctor_id = ss.doctor_id
+            FROM clinic_doctors cd
+            LEFT JOIN regular_schedule rs ON cd.doctor_id = rs.doctor_id
+            LEFT JOIN special_schedule ss ON cd.doctor_id = ss.doctor_id
             WHERE
                 (ss.is_available = TRUE)
                 OR (rs.doctor_id IS NOT NULL AND ss.doctor_id IS NULL)
-            ORDER BY acd.full_name
-        `, [clinic_id, dayOfWeek, date]);
-        
-        const appointmentsResult = await db.query(`SELECT a.appointment_id as id, a.doctor_id, a.customer_id as patient_id, to_char(a.appointment_time, 'HH24:MI') as appointment_time, (a.appointment_time + interval '30 minutes') as end_time, a.status, COALESCE(a.patient_name_at_booking, c.display_name) as patient_name_at_booking FROM appointments a LEFT JOIN customers c ON a.customer_id = c.customer_id WHERE a.clinic_id = $1 AND a.appointment_time >= $2::date AND a.appointment_time < ($2::date + '1 day'::interval) AND a.status = 'confirmed'`, [clinic_id, date]);
+            ORDER BY cd.full_name
+        `;
+
+        const appointmentsQuery = `
+            SELECT 
+                a.appointment_id as id, 
+                a.doctor_id, 
+                a.patient_id, -- Corrected column
+                to_char(a.appointment_time, 'HH24:MI') as appointment_time, 
+                (a.appointment_time + interval '30 minutes') as end_time, 
+                a.status, 
+                COALESCE(a.patient_name_at_booking, p.name) as patient_name_at_booking -- Corrected table and column
+            FROM appointments a 
+            LEFT JOIN patients p ON a.patient_id = p.patient_id -- Corrected join
+            WHERE a.clinic_id = $1 
+              AND a.appointment_time >= $2::date 
+              AND a.appointment_time < ($2::date + '1 day'::interval) 
+              AND a.status = 'confirmed'
+        `;
+
+        const [allDoctorsResult, workingDoctorsResult, appointmentsResult] = await Promise.all([
+             db.query(allDoctorsInClinicQuery, [clinic_id]),
+             db.query(workingDoctorsQuery, [clinic_id, dayOfWeek, date]),
+             db.query(appointmentsQuery, [clinic_id, date])
+        ]);
         
         res.json({
             doctors: workingDoctorsResult.rows,
@@ -141,7 +171,7 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
             appointments: appointmentsResult.rows,
         });
     } catch (err) {
-        console.error(err.message);
+        console.error('CRITICAL ERROR in /api/clinic-day-schedule:', err.message);
         res.status(500).send('Server Error');
     }
 });
@@ -166,7 +196,6 @@ app.get('/api/removable-schedules/:doctor_id', authMiddleware, async (req, res) 
     }
 });
 
-
 app.post('/api/special-schedules', authMiddleware, async (req, res) => {
     const { doctor_id, clinic_id, schedule_date, start_time, end_time, is_available } = req.body;
     try {
@@ -187,7 +216,7 @@ app.post('/api/special-schedules', authMiddleware, async (req, res) => {
 app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     const { clinic_id } = req.query;
     try {
-        const { rows } = await db.query(`SELECT a.appointment_id as id, a.appointment_time::date as appointment_date, to_char(a.appointment_time, 'HH24:MI:SS') as appointment_time, COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown Patient') as patient_name, d.full_name as doctor_name FROM appointments a JOIN doctors d ON a.doctor_id = d.doctor_id LEFT JOIN customers c on a.customer_id = c.customer_id WHERE a.clinic_id = $1 AND a.status = 'pending_confirmation'`, [clinic_id]);
+        const { rows } = await db.query(`SELECT a.appointment_id as id, a.appointment_time::date as appointment_date, to_char(a.appointment_time, 'HH24:MI:SS') as appointment_time, COALESCE(a.patient_name_at_booking, p.name, 'Unknown Patient') as patient_name, d.full_name as doctor_name FROM appointments a JOIN doctors d ON a.doctor_id = d.doctor_id LEFT JOIN patients p on a.patient_id = p.patient_id WHERE a.clinic_id = $1 AND a.status = 'pending_confirmation'`, [clinic_id]);
         res.json(rows);
     } catch (err) {
         console.error(err.message);
@@ -198,7 +227,7 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
 app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
     const { clinic_id, startDate, endDate } = req.query;
     try {
-        const { rows } = await db.query(`SELECT a.appointment_id as id, to_char(a.appointment_time, 'YYYY-MM-DD') as appointment_date, to_char(a.appointment_time, 'HH24:MI:SS') as booking_time, a.status, COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown Patient') as patient_name, COALESCE(a.patient_phone_at_booking, c.phone_number, 'N/A') as phone_number, d.full_name as doctor_name FROM appointments a JOIN doctors d ON a.doctor_id = d.doctor_id LEFT JOIN customers c ON a.customer_id = c.customer_id WHERE a.clinic_id = $1 AND a.status = 'confirmed' AND a.appointment_time >= $2::date AND a.appointment_time < ($3::date + '1 day'::interval) ORDER BY a.appointment_time`, [clinic_id, startDate, endDate]);
+        const { rows } = await db.query(`SELECT a.appointment_id as id, to_char(a.appointment_time, 'YYYY-MM-DD') as appointment_date, to_char(a.appointment_time, 'HH24:MI:SS') as booking_time, a.status, COALESCE(a.patient_name_at_booking, p.name, 'Unknown Patient') as patient_name, COALESCE(a.patient_phone_at_booking, p.phone_number, 'N/A') as phone_number, d.full_name as doctor_name FROM appointments a JOIN doctors d ON a.doctor_id = d.doctor_id LEFT JOIN patients p ON a.patient_id = p.patient_id WHERE a.clinic_id = $1 AND a.status = 'confirmed' AND a.appointment_time >= $2::date AND a.appointment_time < ($3::date + '1 day'::interval) ORDER BY a.appointment_time`, [clinic_id, startDate, endDate]);
         res.json(rows);
     } catch (err) {
         console.error(err.message);
@@ -221,9 +250,6 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     }
 });
 
-// ***************************************************************
-// ** MODIFIED ENDPOINT #2: Get Doctor Availability (includes clinic_id) **
-// ***************************************************************
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     try {
@@ -238,9 +264,6 @@ app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) 
     }
 });
 
-// ***************************************************************
-// ** MODIFIED ENDPOINT #3: Save Doctor Availability (includes clinic_id) **
-// ***************************************************************
 app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     const { availability } = req.body;
@@ -267,7 +290,6 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
     }
 });
 
-
 app.post('/api/appointments', authMiddleware, async (req, res) => {
     const { patient_id, doctor_id, clinic_id, appointment_date, appointment_time, status } = req.body;
     if (!patient_id || !doctor_id || !clinic_id || !appointment_date || !appointment_time) {
@@ -275,12 +297,12 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
     }
     try {
         const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
-        const { rows: customerRows } = await db.query('SELECT display_name, phone_number FROM customers WHERE customer_id = $1', [patient_id]);
-        const patientName = customerRows.length > 0 ? customerRows[0].display_name : 'N/A';
-        const patientPhone = customerRows.length > 0 ? customerRows[0].phone_number : 'N/A';
+        const { rows: patientRows } = await db.query('SELECT name, phone_number FROM patients WHERE patient_id = $1', [patient_id]);
+        const patientName = patientRows.length > 0 ? patientRows[0].name : 'N/A';
+        const patientPhone = patientRows.length > 0 ? patientRows[0].phone_number : 'N/A';
 
         const { rows } = await db.query(
-            'INSERT INTO appointments (customer_id, doctor_id, clinic_id, appointment_time, status, patient_name_at_booking, patient_phone_at_booking) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+            'INSERT INTO appointments (patient_id, doctor_id, clinic_id, appointment_time, status, patient_name_at_booking, patient_phone_at_booking) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
             [patient_id, doctor_id, clinic_id, appointmentTimestamp, status || 'confirmed', patientName, patientPhone]
         );
         res.status(201).json(rows[0]);
