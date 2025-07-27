@@ -171,7 +171,7 @@ app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) 
         const representativeId = representativeIdResult.rows[0].doctor_id;
 
         const { rows } = await db.query(
-            'SELECT day_of_week, start_time, end_time FROM doctor_availability WHERE doctor_id = $1',
+            'SELECT day_of_week, start_time, end_time, clinic_id FROM doctor_availability WHERE doctor_id = $1',
             [representativeId]
         );
         res.json(rows);
@@ -201,8 +201,8 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
         for (const slot of availability) {
             if (slot.start_time && slot.end_time) {
                  await client.query(
-                     'INSERT INTO doctor_availability (doctor_id, day_of_week, start_time, end_time) VALUES ($1, $2, $3, $4)',
-                     [representativeId, slot.day_of_week, slot.start_time, slot.end_time]
+                     'INSERT INTO doctor_availability (doctor_id, day_of_week, start_time, end_time, clinic_id) VALUES ($1, $2, $3, $4, $5)',
+                     [representativeId, slot.day_of_week, slot.start_time, slot.end_time, slot.clinic_id]
                  );
             }
         }
