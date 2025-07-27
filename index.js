@@ -12,19 +12,6 @@ app.use(cors());
 app.use(express.json());
 
 // --- Authentication Routes ---
-app.post('/api/register', async (req, res) => {
-    const { username, password } = req.body;
-    try {
-        const salt = await bcrypt.genSalt(10);
-        const passwordHash = await bcrypt.hash(password, salt);
-        const { rows } = await db.query('INSERT INTO workers (username, password_hash) VALUES ($1, $2) RETURNING id, username', [username, passwordHash]);
-        res.status(201).json({ user: rows[0] });
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ message: err.message || 'Server Error' });
-    }
-});
-
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     try {
@@ -64,104 +51,79 @@ app.get('/api/clinics', authMiddleware, async (req, res) => {
         res.json(rows);
     } catch (err) {
         console.error(err.message);
-        res.status(500).json({ message: err.message || 'Server Error' });
+        res.status(500).json({ message: err.message || 'Server error' });
     }
 });
 
 // ***************************************************************
-// ** CORRECTED ENDPOINT #1: Get unique doctors               **
-// ** This now gets clinic associations from existing schedules **
+// ** REINSTATED AND CORRECTED: Get unique doctors and all their clinics **
 // ***************************************************************
 app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
     try {
         const query = `
             SELECT
-                d.doctor_id AS id,
                 d.full_name AS name,
-                json_agg(DISTINCT jsonb_build_object('id', c.clinic_id, 'name', c.name)) as clinics
+                MIN(d.doctor_id) AS id, -- Use an aggregate to get one ID for the group
+                json_agg(json_build_object('id', c.clinic_id, 'name', c.name)) as clinics
             FROM doctors d
             JOIN clinics c ON d.clinic_id = c.clinic_id
-            GROUP BY d.doctor_id, d.full_name
+            GROUP BY d.full_name
             ORDER BY d.full_name;
         `;
         const { rows } = await db.query(query);
         res.json(rows);
     } catch (err) {
-        console.error("Error in /api/doctors/unique:", err.message);
+        console.error("CRITICAL Error in /api/doctors/unique:", err.message);
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
-// *****************************************************************
-// ** CORRECTED: To match your confirmed database schema **
-// *****************************************************************
+
+// This endpoint gets all doctor records for a specific clinic (for the dashboard)
+app.get('/api/doctors', authMiddleware, async (req, res) => {
+    const { clinic_id } = req.query;
+    if (!clinic_id) {
+        return res.status(400).json({ msg: 'A clinic_id is required.' });
+    }
+    try {
+        const { rows } = await db.query(
+            'SELECT doctor_id AS id, full_name AS name FROM doctors WHERE clinic_id = $1 ORDER BY full_name',
+            [clinic_id]
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error("Error in /api/doctors:", err.message);
+        res.status(500).json({ message: err.message || 'Server Error' });
+    }
+});
+
+
+// This endpoint gets the schedule, which is now simple and does NOT involve special schedules.
 app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     const { clinic_id, date } = req.query;
     if (!clinic_id || !date) return res.status(400).json({ msg: 'Clinic ID and date are required' });
-
     try {
         const dayOfWeek = new Date(date).getDay();
-
-        const allDoctorsInClinicQuery = `
-            SELECT DISTINCT d.doctor_id as id, d.full_name as name, d.specialty
+        
+        const allDoctorsResult = await db.query('SELECT doctor_id as id, full_name as name FROM doctors WHERE clinic_id = $1 ORDER BY full_name', [clinic_id]);
+        
+        const workingDoctorsResult = await db.query(`
+            SELECT d.doctor_id as id, d.full_name as name, d.specialty, da.start_time, da.end_time
             FROM doctors d
-            WHERE d.doctor_id IN (
-                SELECT doctor_id FROM doctor_availability WHERE clinic_id = $1
-                UNION
-                SELECT doctor_id FROM special_schedules WHERE clinic_id = $1
-            )
+            JOIN doctor_availability da ON d.doctor_id = da.doctor_id
+            WHERE d.clinic_id = $1 AND da.day_of_week = $2
             ORDER BY d.full_name
-        `;
-        
-        const workingDoctorsQuery = `
-            WITH working_schedules AS (
-                -- Regular schedule for today, NOT overridden by an unavailable special schedule
-                SELECT da.doctor_id, da.start_time, da.end_time
-                FROM doctor_availability da
-                WHERE da.clinic_id = $1 AND da.day_of_week = $2
-                  AND NOT EXISTS (
-                    SELECT 1 FROM special_schedules ss
-                    WHERE ss.doctor_id = da.doctor_id AND ss.schedule_date = $3 AND ss.is_available = FALSE
-                  )
-                UNION
-                -- Special schedule for today that is explicitly available
-                SELECT ss.doctor_id, ss.start_time, ss.end_time
-                FROM special_schedules ss
-                WHERE ss.clinic_id = $1 AND ss.schedule_date = $3 AND ss.is_available = TRUE
-            )
-            SELECT
-                d.doctor_id as id,
-                d.full_name as name,
-                d.specialty,
-                ws.start_time,
-                ws.end_time
-            FROM doctors d
-            JOIN working_schedules ws ON d.doctor_id = ws.doctor_id
-            ORDER BY d.full_name;
-        `;
+        `, [clinic_id, dayOfWeek]);
 
-        const appointmentsQuery = `
-            SELECT 
-                a.appointment_id as id, 
-                a.doctor_id, 
-                a.patient_id,
-                to_char(a.appointment_time, 'HH24:MI') as appointment_time, 
-                to_char(a.appointment_time + interval '30 minutes', 'HH24:MI') as end_time, 
-                a.status, 
-                COALESCE(a.patient_name_at_booking, p.name) as patient_name_at_booking
-            FROM appointments a 
+        const appointmentsResult = await db.query(`
+            SELECT a.appointment_id as id, a.doctor_id, a.patient_id, to_char(a.appointment_time, 'HH24:MI') as appointment_time,
+                   to_char(a.appointment_time + interval '30 minutes', 'HH24:MI') as end_time, a.status,
+                   COALESCE(a.patient_name_at_booking, p.name) as patient_name_at_booking
+            FROM appointments a
             LEFT JOIN patients p ON a.patient_id = p.patient_id
-            WHERE a.clinic_id = $1 
-              AND a.appointment_date = $2
-              AND a.status = 'confirmed'
-        `;
+            WHERE a.clinic_id = $1 AND a.appointment_date = $2 AND a.status = 'confirmed'
+        `, [clinic_id, date]);
 
-        const [allDoctorsResult, workingDoctorsResult, appointmentsResult] = await Promise.all([
-             db.query(allDoctorsInClinicQuery, [clinic_id]),
-             db.query(workingDoctorsQuery, [clinic_id, dayOfWeek, date]),
-             db.query(appointmentsQuery, [clinic_id, date])
-        ]);
-        
         res.json({
             doctors: workingDoctorsResult.rows,
             all_doctors_in_clinic: allDoctorsResult.rows,
@@ -174,18 +136,21 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
 });
 
 
-app.get('/api/removable-schedules/:doctor_id', authMiddleware, async (req, res) => {
+// This endpoint correctly fetches the simple weekly schedule for a doctor.
+app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     try {
-        const { rows } = await db.query(`
-            SELECT
-                ss.schedule_date,
-                TO_CHAR(ss.schedule_date, 'Day, DD TMMonth YYYY') || ' (' || c.name || ')' as display_text
-            FROM special_schedules ss
-            JOIN clinics c ON ss.clinic_id = c.clinic_id
-            WHERE ss.doctor_id = $1 AND ss.schedule_date >= CURRENT_DATE AND ss.is_available = TRUE
-            ORDER BY ss.schedule_date;
-        `, [doctor_id]);
+        // We use a representative doctor_id since the weekly schedule is the same for a doctor across all clinics.
+        const representativeIdResult = await db.query('SELECT doctor_id FROM doctors WHERE full_name = (SELECT full_name FROM doctors WHERE doctor_id = $1) LIMIT 1', [doctor_id]);
+        if (representativeIdResult.rows.length === 0) {
+            return res.json([]);
+        }
+        const representativeId = representativeIdResult.rows[0].doctor_id;
+
+        const { rows } = await db.query(
+            'SELECT day_of_week, start_time, end_time FROM doctor_availability WHERE doctor_id = $1',
+            [representativeId]
+        );
         res.json(rows);
     } catch (err) {
         console.error(err.message);
@@ -193,22 +158,43 @@ app.get('/api/removable-schedules/:doctor_id', authMiddleware, async (req, res) 
     }
 });
 
-app.post('/api/special-schedules', authMiddleware, async (req, res) => {
-    const { doctor_id, clinic_id, schedule_date, start_time, end_time, is_available } = req.body;
+// This endpoint correctly saves the simple weekly schedule for all of a doctor's records.
+app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
+    const { doctor_id } = req.params; // This is the representative ID from the dropdown
+    const { availability } = req.body;
+    const client = await db.pool.connect();
     try {
-        const { rows } = await db.query(`
-            INSERT INTO special_schedules (doctor_id, clinic_id, schedule_date, start_time, end_time, is_available)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (doctor_id, schedule_date) DO UPDATE SET start_time = EXCLUDED.start_time, end_time = EXCLUDED.end_time, is_available = EXCLUDED.is_available, clinic_id = EXCLUDED.clinic_id
-            RETURNING *;
-        `, [doctor_id, clinic_id, schedule_date, start_time, end_time, is_available]);
-        res.status(201).json(rows[0]);
+        // First, find all doctor_ids associated with this doctor's full_name
+        const allDoctorIdsResult = await client.query('SELECT doctor_id FROM doctors WHERE full_name = (SELECT full_name FROM doctors WHERE doctor_id = $1)', [doctor_id]);
+        const allDoctorIds = allDoctorIdsResult.rows.map(r => r.doctor_id);
+
+        await client.query('BEGIN');
+        
+        // Delete all existing schedules for this doctor name
+        await client.query('DELETE FROM doctor_availability WHERE doctor_id = ANY($1::int[])', [allDoctorIds]);
+
+        // Insert the new schedule for just ONE of the doctor's IDs.
+        const representativeId = allDoctorIds[0];
+        for (const slot of availability) {
+            if (slot.start_time && slot.end_time) {
+                 await client.query(
+                     'INSERT INTO doctor_availability (doctor_id, day_of_week, start_time, end_time) VALUES ($1, $2, $3, $4)',
+                     [representativeId, slot.day_of_week, slot.start_time, slot.end_time]
+                 );
+            }
+        }
+        await client.query('COMMIT');
+        res.status(201).send({ message: 'Availability updated successfully' });
     } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ message: err.message || 'Server Error' });
+        await client.query('ROLLBACK');
+        console.error("Error saving availability:", err.message);
+        res.status(500).send('Server Error');
+    } finally {
+        client.release();
     }
 });
 
+// --- Other Endpoints (Unchanged) ---
 app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     const { clinic_id } = req.query;
     try {
@@ -219,7 +205,6 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
-
 app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
     const { clinic_id, startDate, endDate } = req.query;
     try {
@@ -230,62 +215,17 @@ app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
-
 app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
     try {
-        const { rows } = await db.query(
-            'UPDATE appointments SET status = $1 WHERE appointment_id = $2 RETURNING *',
-            [status, id]
-        );
+        const { rows } = await db.query('UPDATE appointments SET status = $1 WHERE appointment_id = $2 RETURNING *', [status, id]);
         res.json(rows[0]);
     } catch (err) {
         console.error(err.message);
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
-
-app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
-    const { doctor_id } = req.params;
-    try {
-        const { rows } = await db.query(
-            'SELECT day_of_week, start_time, end_time, clinic_id FROM doctor_availability WHERE doctor_id = $1',
-            [doctor_id]
-        );
-        res.json(rows);
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ message: err.message || 'Server Error' });
-    }
-});
-
-app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
-    const { doctor_id } = req.params;
-    const { availability } = req.body;
-    const client = await db.pool.connect();
-    try {
-        await client.query('BEGIN');
-        await client.query('DELETE FROM doctor_availability WHERE doctor_id = $1', [doctor_id]);
-        for (const slot of availability) {
-            if (slot.start_time && slot.end_time && slot.clinic_id) {
-                 await client.query(
-                     'INSERT INTO doctor_availability (doctor_id, day_of_week, start_time, end_time, clinic_id) VALUES ($1, $2, $3, $4, $5)',
-                     [doctor_id, slot.day_of_week, slot.start_time, slot.end_time, slot.clinic_id]
-                 );
-            }
-        }
-        await client.query('COMMIT');
-        res.status(201).send({ message: 'Availability updated successfully' });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    } finally {
-        client.release();
-    }
-});
-
 app.post('/api/appointments', authMiddleware, async (req, res) => {
     const { patient_id, doctor_id, clinic_id, appointment_date, appointment_time, status } = req.body;
     if (!patient_id || !doctor_id || !clinic_id || !appointment_date || !appointment_time) {
@@ -296,7 +236,6 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
         const { rows: patientRows } = await db.query('SELECT name, phone_number FROM patients WHERE patient_id = $1', [patient_id]);
         const patientName = patientRows.length > 0 ? patientRows[0].name : 'N/A';
         const patientPhone = patientRows.length > 0 ? patientRows[0].phone_number : 'N/A';
-
         const { rows } = await db.query(
             'INSERT INTO appointments (patient_id, doctor_id, clinic_id, appointment_date, appointment_time, status, patient_name_at_booking, patient_phone_at_booking) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
             [patient_id, doctor_id, clinic_id, appointment_date, appointmentTimestamp, status || 'confirmed', patientName, patientPhone]
@@ -307,7 +246,6 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
-
 app.listen(port, () => {
     console.log(`✅ Server started on port ${port}`);
 });
