@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const { format, addMonths, startOfMonth, getDay, eachDayOfInterval, addDays, endOfMonth } = require('date-fns');
 const db = require('./db');
 
 const app = express();
@@ -243,7 +244,69 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     }
 });
 
+app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res) => {
+    const { doctor_id } = req.params;
+    try {
+        const nameResult = await db.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [doctor_id]);
+        if (nameResult.rows.length === 0) return res.status(404).json({ message: 'Doctor not found.' });
+        const doctorName = nameResult.rows[0].full_name;
+        
+        const doctorRecords = await db.query('SELECT doctor_id, clinic_id, full_name, c.name as clinic_name FROM doctors d JOIN clinics c ON d.clinic_id = c.clinic_id WHERE d.full_name = $1', [doctorName]);
 
+        const availabilityResult = await db.query('SELECT doctor_id, day_of_week, start_time, end_time FROM doctor_availability WHERE doctor_id = ANY($1::int[])', [doctorRecords.rows.map(r => r.doctor_id)]);
+        const specialSchedulesResult = await db.query('SELECT doctor_id, TO_CHAR(schedule_date, \'YYYY-MM-DD\') as schedule_date, start_time, end_time, is_available FROM special_schedules WHERE doctor_id = ANY($1::int[])', [doctorRecords.rows.map(r => r.doctor_id)]);
+
+        const scheduleMap = new Map();
+        const startDate = new Date();
+        const endDate = addMonths(startDate, 2); // Look 2 months ahead
+
+        // 1. Process weekly schedule
+        eachDayOfInterval({ start: startDate, end: endDate }).forEach(day => {
+            const dayOfWeek = getDay(day);
+            availabilityResult.rows.forEach(avail => {
+                if (avail.day_of_week === dayOfWeek) {
+                    const docInfo = doctorRecords.rows.find(d => d.doctor_id === avail.doctor_id);
+                    if (docInfo) {
+                        scheduleMap.set(format(day, 'yyyy-MM-dd'), {
+                            date: format(day, 'yyyy-MM-dd'),
+                            isAvailable: true,
+                            startTime: avail.start_time,
+                            endTime: avail.end_time,
+                            clinicId: docInfo.clinic_id,
+                            clinicName: docInfo.clinic_name
+                        });
+                    }
+                }
+            });
+        });
+
+        // 2. Override with special schedules
+        specialSchedulesResult.rows.forEach(special => {
+            if (special.is_available) {
+                const docInfo = doctorRecords.rows.find(d => d.doctor_id === special.doctor_id);
+                if (docInfo) {
+                    scheduleMap.set(special.schedule_date, {
+                        date: special.schedule_date,
+                        isAvailable: true,
+                        startTime: special.start_time,
+                        endTime: special.end_time,
+                        clinicId: docInfo.clinic_id,
+                        clinicName: docInfo.clinic_name
+                    });
+                }
+            } else {
+                scheduleMap.delete(special.schedule_date); // Day off, remove from working days
+            }
+        });
+
+        const workingDays = Array.from(scheduleMap.values()).sort((a,b) => new Date(a.date) - new Date(b.date));
+        res.json(workingDays);
+
+    } catch (err) {
+        console.error("Error calculating work schedule:", err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
 // This endpoint correctly fetches the simple weekly schedule for a doctor.
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
@@ -425,39 +488,62 @@ app.get('/api/special-schedules/:doctor_id', authMiddleware, async (req, res) =>
 
 // Add a new special schedule
 app.post('/api/special-schedules', authMiddleware, async (req, res) => {
-    const { doctor_id, clinic_id, schedule_date, start_time, end_time, is_available } = req.body;
-    
-    if (!doctor_id || !clinic_id || !schedule_date) {
-        return res.status(400).json({ message: 'Doctor, clinic, and date are required.' });
-    }
+    const { doctor_id, clinic_id, schedule_date, start_time, end_time, is_available, rule } = req.body;
+
+    if (!doctor_id || !clinic_id) return res.status(400).json({ message: 'Doctor and clinic are required.' });
 
     const client = await db.pool.connect();
     try {
-        // Find the specific doctor_id for the given doctor name and clinic
         const nameResult = await client.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [doctor_id]);
-        if (nameResult.rows.length === 0) {
-            return res.status(404).send({ message: 'Doctor not found.' });
-        }
+        if (nameResult.rows.length === 0) return res.status(404).send({ message: 'Doctor not found.' });
         const doctorName = nameResult.rows[0].full_name;
 
-        const specificDoctorIdResult = await client.query(
-            'SELECT doctor_id FROM doctors WHERE full_name = $1 AND clinic_id = $2',
-            [doctorName, clinic_id]
-        );
-        if (specificDoctorIdResult.rows.length === 0) {
-            return res.status(404).send({ message: 'Doctor is not assigned to this clinic.' });
-        }
+        const specificDoctorIdResult = await client.query('SELECT doctor_id FROM doctors WHERE full_name = $1 AND clinic_id = $2', [doctorName, clinic_id]);
+        if (specificDoctorIdResult.rows.length === 0) return res.status(404).send({ message: 'Doctor is not assigned to this clinic.' });
         const specificDoctorId = specificDoctorIdResult.rows[0].doctor_id;
 
-        const { rows } = await client.query(
-            `INSERT INTO special_schedules (doctor_id, clinic_id, schedule_date, start_time, end_time, is_available)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             RETURNING id, doctor_id, clinic_id, TO_CHAR(schedule_date, 'YYYY-MM-DD') as schedule_date, start_time, end_time, is_available`,
-            [specificDoctorId, clinic_id, schedule_date, start_time, end_time, is_available]
-        );
-        res.status(201).json(rows[0]);
+        await client.query('BEGIN');
+        
+        // --- Logic to handle single date OR recurring rule ---
+        let datesToInsert = [];
+        if (rule) { // Recurring rule logic
+            const { week, day } = rule;
+            const year = new Date().getFullYear();
+            // Create schedules for the next 12 months
+            for (let month = 0; month < 12; month++) {
+                const firstDayOfMonth = new Date(year, month, 1);
+                let firstOccurrence = startOfMonth(firstDayOfMonth);
+                while (getDay(firstOccurrence) !== day) {
+                    firstOccurrence = addDays(firstOccurrence, 1);
+                }
+                const targetDate = addDays(firstOccurrence, (week - 1) * 7);
+                if (targetDate.getMonth() === month) {
+                    datesToInsert.push(format(targetDate, 'yyyy-MM-dd'));
+                }
+            }
+        } else if (schedule_date) { // Single date logic
+            datesToInsert.push(schedule_date);
+        }
+
+        if (datesToInsert.length === 0) {
+            return res.status(400).json({ message: 'No valid dates found for the given rule.' });
+        }
+
+        const insertPromises = datesToInsert.map(date => {
+            return client.query(
+                `INSERT INTO special_schedules (doctor_id, clinic_id, schedule_date, start_time, end_time, is_available)
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [specificDoctorId, clinic_id, date, start_time, end_time, is_available]
+            );
+        });
+        
+        await Promise.all(insertPromises);
+        await client.query('COMMIT');
+        res.status(201).json({ message: 'Special schedule(s) created successfully.' });
+
     } catch (err) {
-        console.error("Error adding special schedule:", err.message);
+        await client.query('ROLLBACK');
+        console.error("Error in POST /api/special-schedules:", err.message);
         res.status(500).json({ message: 'Server Error' });
     } finally {
         client.release();
