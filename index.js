@@ -163,17 +163,17 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     try {
-        // We use a representative doctor_id since the weekly schedule is the same for a doctor across all clinics.
-        const representativeIdResult = await db.query('SELECT doctor_id FROM doctors WHERE full_name = (SELECT full_name FROM doctors WHERE doctor_id = $1) LIMIT 1', [doctor_id]);
-        if (representativeIdResult.rows.length === 0) {
-            return res.json([]);
-        }
-        const representativeId = representativeIdResult.rows[0].doctor_id;
-
-        const { rows } = await db.query(
-            'SELECT day_of_week, start_time, end_time, clinic_id FROM doctor_availability WHERE doctor_id = $1',
-            [representativeId]
-        );
+        const query = `
+            SELECT
+                da.day_of_week,
+                da.start_time,
+                da.end_time,
+                d.clinic_id
+            FROM doctor_availability da
+            JOIN doctors d ON da.doctor_id = d.doctor_id
+            WHERE d.full_name = (SELECT full_name FROM doctors WHERE doctor_id = $1)
+        `;
+        const { rows } = await db.query(query, [doctor_id]);
         res.json(rows);
     } catch (err) {
         console.error(err.message);
@@ -183,29 +183,36 @@ app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) 
 
 // This endpoint correctly saves the simple weekly schedule for all of a doctor's records.
 app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
-    const { doctor_id } = req.params; // This is the representative ID from the dropdown
+    const { doctor_id } = req.params;
     const { availability } = req.body;
     const client = await db.pool.connect();
     try {
-        // First, find all doctor_ids associated with this doctor's full_name
-        const allDoctorIdsResult = await client.query('SELECT doctor_id FROM doctors WHERE full_name = (SELECT full_name FROM doctors WHERE doctor_id = $1)', [doctor_id]);
-        const allDoctorIds = allDoctorIdsResult.rows.map(r => r.doctor_id);
+        const nameResult = await client.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [doctor_id]);
+        if (nameResult.rows.length === 0) {
+            return res.status(404).send({ message: 'Doctor not found.' });
+        }
+        const doctorName = nameResult.rows[0].full_name;
+
+        const allDoctorRecordsResult = await client.query('SELECT doctor_id, clinic_id FROM doctors WHERE full_name = $1', [doctorName]);
+        const doctorRecords = allDoctorRecordsResult.rows;
+        const allDoctorIds = doctorRecords.map(r => r.doctor_id);
 
         await client.query('BEGIN');
         
-        // Delete all existing schedules for this doctor name
         await client.query('DELETE FROM doctor_availability WHERE doctor_id = ANY($1::int[])', [allDoctorIds]);
 
-        // Insert the new schedule for just ONE of the doctor's IDs.
-        const representativeId = allDoctorIds[0];
         for (const slot of availability) {
-            if (slot.start_time && slot.end_time) {
-                 await client.query(
-                     'INSERT INTO doctor_availability (doctor_id, day_of_week, start_time, end_time, clinic_id) VALUES ($1, $2, $3, $4, $5)',
-                     [representativeId, slot.day_of_week, slot.start_time, slot.end_time, slot.clinic_id]
-                 );
+            if (slot.start_time && slot.end_time && slot.clinic_id) {
+                const correspondingDoctor = doctorRecords.find(rec => rec.clinic_id === slot.clinic_id);
+                if (correspondingDoctor) {
+                    await client.query(
+                        'INSERT INTO doctor_availability (doctor_id, day_of_week, start_time, end_time) VALUES ($1, $2, $3, $4)',
+                        [correspondingDoctor.doctor_id, slot.day_of_week, slot.start_time, slot.end_time]
+                    );
+                }
             }
         }
+        
         await client.query('COMMIT');
         res.status(201).send({ message: 'Availability updated successfully' });
     } catch (err) {
