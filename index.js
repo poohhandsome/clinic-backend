@@ -101,12 +101,18 @@ app.get('/api/doctors', authMiddleware, async (req, res) => {
 // This endpoint gets the schedule, which is now simple and does NOT involve special schedules.
 app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     const { clinic_id, date } = req.query;
-    if (!clinic_id || !date) return res.status(400).json({ msg: 'Clinic ID and date are required' });
+    if (!clinic_id || !date) {
+        return res.status(400).json({ msg: 'Clinic ID and date are required' });
+    }
+
     try {
         const dayOfWeek = new Date(date).getDay();
-        
-        const allDoctorsResult = await db.query('SELECT doctor_id as id, full_name as name FROM doctors WHERE clinic_id = $1 ORDER BY full_name', [clinic_id]);
-        
+
+        const allDoctorsResult = await db.query(
+            'SELECT doctor_id as id, full_name as name FROM doctors WHERE clinic_id = $1 ORDER BY full_name',
+            [clinic_id]
+        );
+
         const workingDoctorsResult = await db.query(`
             SELECT d.doctor_id as id, d.full_name as name, d.specialty, da.start_time, da.end_time
             FROM doctors d
@@ -116,11 +122,15 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
         `, [clinic_id, dayOfWeek]);
 
         const appointmentsResult = await db.query(`
-            SELECT a.appointment_id as id, a.doctor_id, a.patient_id, to_char(a.appointment_time, 'HH24:MI') as appointment_time,
-                   to_char(a.appointment_time + interval '30 minutes', 'HH24:MI') as end_time, a.status,
-                   COALESCE(a.patient_name_at_booking, p.name) as patient_name_at_booking
+            SELECT a.appointment_id as id,
+                   a.doctor_id,
+                   a.patient_id,
+                   TO_CHAR(a.appointment_time, 'HH24:MI') as appointment_time,
+                   TO_CHAR(a.appointment_time + INTERVAL '30 minutes', 'HH24:MI') as end_time,
+                   a.status,
+                   COALESCE(a.patient_name_at_booking, c.name) as patient_name_at_booking
             FROM appointments a
-            LEFT JOIN patients p ON a.patient_id = p.patient_id
+            LEFT JOIN customers c ON a.patient_id = c.customer_id
             WHERE a.clinic_id = $1 AND a.appointment_date = $2 AND a.status = 'confirmed'
         `, [clinic_id, date]);
 
@@ -129,6 +139,7 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
             all_doctors_in_clinic: allDoctorsResult.rows,
             appointments: appointmentsResult.rows,
         });
+
     } catch (err) {
         console.error("Error in /api/clinic-day-schedule:", err.message);
         res.status(500).json({ message: err.message || 'Server Error' });
@@ -198,7 +209,19 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
 app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     const { clinic_id } = req.query;
     try {
-        const { rows } = await db.query(`SELECT a.appointment_id as id, a.appointment_date, to_char(a.appointment_time, 'HH24:MI:SS') as appointment_time, COALESCE(a.patient_name_at_booking, p.name, 'Unknown Patient') as patient_name, d.full_name as doctor_name FROM appointments a JOIN doctors d ON a.doctor_id = d.doctor_id LEFT JOIN patients p on a.patient_id = p.patient_id WHERE a.clinic_id = $1 AND a.status = 'pending_confirmation'`, [clinic_id]);
+        const { rows } = await db.query(`
+            SELECT 
+                a.appointment_id AS id, 
+                a.appointment_date, 
+                TO_CHAR(a.appointment_time, 'HH24:MI:SS') AS appointment_time, 
+                COALESCE(a.patient_name_at_booking, c.name, 'Unknown Patient') AS patient_name, 
+                d.full_name AS doctor_name 
+            FROM appointments a 
+            JOIN doctors d ON a.doctor_id = d.doctor_id 
+            LEFT JOIN customers c ON a.patient_id = c.customer_id 
+            WHERE a.clinic_id = $1 
+              AND a.status = 'pending_confirmation'
+        `, [clinic_id]);
         res.json(rows);
     } catch (err) {
         console.error(err.message);
