@@ -75,17 +75,12 @@ app.get('/api/clinics', authMiddleware, async (req, res) => {
 app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
     try {
         const query = `
-            WITH DoctorClinicPairs AS (
-                SELECT DISTINCT doctor_id, clinic_id FROM doctor_availability
-        
-            )
             SELECT
                 d.doctor_id AS id,
                 d.full_name AS name,
                 json_agg(DISTINCT jsonb_build_object('id', c.clinic_id, 'name', c.name)) as clinics
             FROM doctors d
-            JOIN DoctorClinicPairs dcp ON d.doctor_id = dcp.doctor_id
-            JOIN clinics c ON dcp.clinic_id = c.clinic_id
+            JOIN clinics c ON d.clinic_id = c.clinic_id
             GROUP BY d.doctor_id, d.full_name
             ORDER BY d.full_name;
         `;
