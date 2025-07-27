@@ -20,9 +20,9 @@ app.post('/api/register', async (req, res) => {
         const { rows } = await db.query('INSERT INTO workers (username, password_hash) VALUES ($1, $2) RETURNING id, username', [username, passwordHash]);
         res.status(201).json({ user: rows[0] });
     } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ msg: 'Server error, username may already exist.' });
-    }
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 app.post('/api/login', async (req, res) => {
@@ -38,10 +38,10 @@ app.post('/api/login', async (req, res) => {
             if (err) throw err;
             res.json({ token, user: { id: user.id, username: user.username } });
         });
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    }
+   } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 // --- Auth Middleware ---
@@ -63,9 +63,9 @@ app.get('/api/clinics', authMiddleware, async (req, res) => {
         const { rows } = await db.query('SELECT clinic_id as id, name FROM clinics ORDER BY name');
         res.json(rows);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server error');
-    }
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 // ***************************************************************
@@ -93,9 +93,9 @@ app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
         const { rows } = await db.query(query);
         res.json(rows);
     } catch (err) {
-        console.error('Error fetching unique doctors:', err.message);
-        res.status(500).send('Server Error');
-    }
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 
@@ -177,9 +177,9 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
             appointments: appointmentsResult.rows,
         });
     } catch (err) {
-        console.error('CRITICAL ERROR in /api/clinic-day-schedule:', err.message);
-        res.status(500).send('Server Error');
-    }
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 
@@ -197,9 +197,9 @@ app.get('/api/removable-schedules/:doctor_id', authMiddleware, async (req, res) 
         `, [doctor_id]);
         res.json(rows);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    }
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 app.post('/api/special-schedules', authMiddleware, async (req, res) => {
@@ -212,10 +212,10 @@ app.post('/api/special-schedules', authMiddleware, async (req, res) => {
             RETURNING *;
         `, [doctor_id, clinic_id, schedule_date, start_time, end_time, is_available]);
         res.status(201).json(rows[0]);
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    }
+   } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 
@@ -225,9 +225,9 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
         const { rows } = await db.query(`SELECT a.appointment_id as id, a.appointment_date, to_char(a.appointment_time, 'HH24:MI:SS') as appointment_time, COALESCE(a.patient_name_at_booking, p.name, 'Unknown Patient') as patient_name, d.full_name as doctor_name FROM appointments a JOIN doctors d ON a.doctor_id = d.doctor_id LEFT JOIN patients p on a.patient_id = p.patient_id WHERE a.clinic_id = $1 AND a.status = 'pending_confirmation'`, [clinic_id]);
         res.json(rows);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    }
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
@@ -236,9 +236,9 @@ app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
         const { rows } = await db.query(`SELECT a.appointment_id as id, a.appointment_date, to_char(a.appointment_time, 'HH24:MI:SS') as booking_time, a.status, COALESCE(a.patient_name_at_booking, p.name, 'Unknown Patient') as patient_name, COALESCE(a.patient_phone_at_booking, p.phone_number, 'N/A') as phone_number, d.full_name as doctor_name FROM appointments a JOIN doctors d ON a.doctor_id = d.doctor_id LEFT JOIN patients p ON a.patient_id = p.patient_id WHERE a.clinic_id = $1 AND a.status = 'confirmed' AND a.appointment_date BETWEEN $2 AND $3 ORDER BY a.appointment_time`, [clinic_id, startDate, endDate]);
         res.json(rows);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    }
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
@@ -251,9 +251,9 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
         );
         res.json(rows[0]);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    }
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
@@ -265,9 +265,9 @@ app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) 
         );
         res.json(rows);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    }
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
@@ -313,9 +313,9 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
         );
         res.status(201).json(rows[0]);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    }
+    console.error(err.message);
+    res.status(500).json({ message: err.message || 'Server Error' });
+}
 });
 
 app.listen(port, () => {
