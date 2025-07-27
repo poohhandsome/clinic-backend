@@ -122,17 +122,19 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
         `, [clinic_id, dayOfWeek]);
 
         const appointmentsResult = await db.query(`
-    SELECT a.appointment_id as id,
-           a.doctor_id,
-           a.customer_id,
-           TO_CHAR(a.appointment_time, 'HH24:MI') as appointment_time,
-           TO_CHAR(a.appointment_time + INTERVAL '30 minutes', 'HH24:MI') as end_time,
-           a.status,
-           COALESCE(a.patient_name_at_booking, c.name) as patient_name_at_booking
-    FROM appointments a
-    LEFT JOIN customers c ON a.customer_id = c.customer_id
-    WHERE a.clinic_id = $1 AND a.appointment_date = $2 AND a.status = 'confirmed'
-`, [clinic_id, date]);
+            SELECT 
+                a.appointment_id as id,
+                a.doctor_id,
+                a.customer_id,
+                TO_CHAR(a.appointment_time, 'HH24:MI') as appointment_time,
+                TO_CHAR(a.appointment_time + INTERVAL '30 minutes', 'HH24:MI') as end_time,
+                a.status,
+                COALESCE(a.patient_name_at_booking, c.full_name) as patient_name_at_booking
+            FROM appointments a
+            LEFT JOIN customers c ON a.customer_id = c.customer_id
+            WHERE a.clinic_id = $1 AND DATE(a.appointment_time) = $2 AND a.status = 'confirmed'
+        `, [clinic_id, date]);
+
         res.json({
             doctors: workingDoctorsResult.rows,
             all_doctors_in_clinic: allDoctorsResult.rows,
@@ -211,7 +213,7 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
         const { rows } = await db.query(`
             SELECT 
                 a.appointment_id AS id, 
-                a.appointment_date, 
+                TO_CHAR(a.appointment_time, 'YYYY-MM-DD') AS appointment_date,
                 TO_CHAR(a.appointment_time, 'HH24:MI:SS') AS appointment_time, 
                 COALESCE(a.patient_name_at_booking, c.name, 'Unknown Patient') AS patient_name, 
                 d.full_name AS doctor_name 
