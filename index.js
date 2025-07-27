@@ -251,7 +251,7 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
         if (nameResult.rows.length === 0) return res.status(404).json({ message: 'Doctor not found.' });
         const doctorName = nameResult.rows[0].full_name;
         
-        const doctorRecords = await db.query('SELECT doctor_id, clinic_id, full_name, c.name as clinic_name FROM doctors d JOIN clinics c ON d.clinic_id = c.clinic_id WHERE d.full_name = $1', [doctorName]);
+        const doctorRecords = await db.query('SELECT d.doctor_id, d.clinic_id, d.full_name, c.name as clinic_name FROM doctors d JOIN clinics c ON d.clinic_id = c.clinic_id WHERE d.full_name = $1', [doctorName]);
 
         const availabilityResult = await db.query('SELECT doctor_id, day_of_week, start_time, end_time FROM doctor_availability WHERE doctor_id = ANY($1::int[])', [doctorRecords.rows.map(r => r.doctor_id)]);
         const specialSchedulesResult = await db.query('SELECT doctor_id, TO_CHAR(schedule_date, \'YYYY-MM-DD\') as schedule_date, start_time, end_time, is_available FROM special_schedules WHERE doctor_id = ANY($1::int[])', [doctorRecords.rows.map(r => r.doctor_id)]);
