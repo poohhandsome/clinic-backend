@@ -76,7 +76,7 @@ app.get('/api/clinics', authMiddleware, async (req, res) => {
 // ***************************************************************
 app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
     try {
-        // This query now correctly joins tables based on your schema.
+        // This query now correctly joins tables based on your schema images.
         const query = `
             SELECT
                 d.doctor_id AS id,
@@ -96,12 +96,13 @@ app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
     }
 });
 
+
 app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     const { clinic_id, date } = req.query;
     if (!clinic_id || !date) return res.status(400).json({ msg: 'Clinic ID and date are required' });
     try {
         const dayOfWeek = new Date(date).getDay();
-        const allDoctorsResult = await db.query('SELECT doctor_id as id, full_name as name, specialty FROM doctors d JOIN doctor_clinics dc ON d.doctor_id = dc.doctor_id WHERE dc.clinic_id = $1 ORDER BY full_name', [clinic_id]);
+        const allDoctorsResult = await db.query('SELECT d.doctor_id as id, d.full_name as name FROM doctors d JOIN doctor_clinics dc ON d.doctor_id = dc.doctor_id WHERE dc.clinic_id = $1 ORDER BY d.full_name', [clinic_id]);
         
         const workingDoctorsResult = await db.query(`
             WITH regular_schedule AS (
@@ -221,7 +222,7 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
 });
 
 // ***************************************************************
-// ** MODIFIED ENDPOINT: Get Doctor Availability (includes clinic_id) **
+// ** MODIFIED ENDPOINT #2: Get Doctor Availability (includes clinic_id) **
 // ***************************************************************
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
@@ -238,7 +239,7 @@ app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) 
 });
 
 // ***************************************************************
-// ** MODIFIED ENDPOINT: Save Doctor Availability (includes clinic_id) **
+// ** MODIFIED ENDPOINT #3: Save Doctor Availability (includes clinic_id) **
 // ***************************************************************
 app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
@@ -265,6 +266,7 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
         client.release();
     }
 });
+
 
 app.post('/api/appointments', authMiddleware, async (req, res) => {
     const { patient_id, doctor_id, clinic_id, appointment_date, appointment_time, status } = req.body;
