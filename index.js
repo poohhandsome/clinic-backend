@@ -112,6 +112,13 @@ app.post('/api/doctors', authMiddleware, async (req, res) => {
         const salt = await require('bcrypt').genSalt(10);
         const passwordHash = await require('bcrypt').hash(password, salt);
 
+        // Check if the email already exists for another doctor
+        const emailCheck = await client.query('SELECT * FROM doctors WHERE email = $1 AND full_name != $2', [email, fullName.trim()]);
+        if (emailCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ message: 'This email is already in use by another doctor.' });
+        }
+
         const insertPromises = clinicIds.map(clinicId => {
             return client.query(
                 'INSERT INTO doctors (full_name, specialty, clinic_id, email, password_hash, color, status) VALUES ($1, $2, $3, $4, $5, $6, $7)',
@@ -134,6 +141,9 @@ app.post('/api/doctors', authMiddleware, async (req, res) => {
     }
 });
 
+// ***************************************************************
+// ** CORRECTED: Fixed the "duplicate key" bug when editing a doctor **
+// ***************************************************************
 app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { clinicIds, specialty, email, color, status, password } = req.body;
@@ -146,6 +156,7 @@ app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
     try {
         await client.query('BEGIN');
 
+        // Step 1: Get the doctor's full name from a representative ID
         const nameResult = await client.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [id]);
         if (nameResult.rows.length === 0) {
             await client.query('ROLLBACK');
@@ -153,32 +164,50 @@ app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
         }
         const fullName = nameResult.rows[0].full_name;
 
-        await client.query(
-            'UPDATE doctors SET specialty = $1, email = $2, color = $3, status = $4 WHERE full_name = $5',
-            [specialty, email, color, status, fullName]
-        );
-        
-        if (password) {
-            const salt = await require('bcrypt').genSalt(10);
-            const passwordHash = await require('bcrypt').hash(password, salt);
-            await client.query('UPDATE doctors SET password_hash = $1 WHERE full_name = $2', [passwordHash, fullName]);
+        // Step 2: Check if the new email is already taken by ANOTHER doctor
+        const emailCheck = await client.query('SELECT doctor_id FROM doctors WHERE email = $1 AND full_name != $2', [email, fullName]);
+        if (emailCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ message: 'This email is already in use by another doctor.' });
         }
-
+        
+        // Step 3: Get all current assignments for THIS doctor
         const currentAssignmentsResult = await client.query('SELECT doctor_id, clinic_id FROM doctors WHERE full_name = $1', [fullName]);
         const currentClinicIds = currentAssignmentsResult.rows.map(a => a.clinic_id);
+
+        // Step 4: Update all existing records for this doctor with the new shared info
+        let passwordHash = null;
+        if (password) {
+            const salt = await require('bcrypt').genSalt(10);
+            passwordHash = await require('bcrypt').hash(password, salt);
+            await client.query(
+                'UPDATE doctors SET specialty = $1, email = $2, color = $3, status = $4, password_hash = $5 WHERE full_name = $6',
+                [specialty, email, color, status, passwordHash, fullName]
+            );
+        } else {
+             await client.query(
+                'UPDATE doctors SET specialty = $1, email = $2, color = $3, status = $4 WHERE full_name = $5',
+                [specialty, email, color, status, fullName]
+            );
+        }
         
+        // Step 5: Determine which clinics to add and remove
         const clinicsToAdd = clinicIds.filter(cid => !currentClinicIds.includes(cid));
         const doctorIdsToRemove = currentAssignmentsResult.rows
             .filter(a => !clinicIds.includes(a.clinic_id))
             .map(a => a.doctor_id);
 
+        // Step 6: Remove old assignments
         if (doctorIdsToRemove.length > 0) {
             await client.query('DELETE FROM doctors WHERE doctor_id = ANY($1::int[])', [doctorIdsToRemove]);
         }
 
+        // Step 7: Add new assignments, reusing the already updated info
         const addPromises = clinicsToAdd.map(clinicId => {
-            return client.query('INSERT INTO doctors (full_name, specialty, clinic_id, email, color, status) VALUES ($1, $2, $3, $4, $5, $6)', 
-            [fullName, specialty, clinicId, email, color, status]);
+            return client.query(
+                'INSERT INTO doctors (full_name, specialty, clinic_id, email, password_hash, color, status) VALUES ($1, $2, $3, $4, $5, $6, $7)', 
+                [fullName, specialty, clinicId, email, passwordHash, color, status]
+            );
         });
         await Promise.all(addPromises);
 
@@ -187,11 +216,16 @@ app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
     } catch (err) {
         await client.query('ROLLBACK');
         console.error("Error in PUT /api/doctors/:id/clinics:", err.message);
+        // Check for unique constraint violation on the new inserts
+        if (err.code === '23505') {
+            return res.status(409).json({ message: 'This doctor is already assigned to one of the selected clinics.' });
+        }
         res.status(500).json({ message: err.message || 'Server Error' });
     } finally {
         client.release();
     }
 });
+
 
 app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     const { clinic_id, date } = req.query;
@@ -264,9 +298,7 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     }
 });
 
-// ***************************************************************
-// ** CORRECTED: Fixed "doctorRecords.some is not a function" bug **
-// ***************************************************************
+
 app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res) => {
     try {
         const { doctor_id } = req.params;
