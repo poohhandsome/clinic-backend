@@ -14,7 +14,6 @@ const port = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// --- Authentication Routes ---
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     try {
@@ -135,19 +134,16 @@ app.post('/api/doctors', authMiddleware, async (req, res) => {
 // ***************************************************************
 // ** REWRITTEN: Update doctor using the new normalized tables **
 // ***************************************************************
-app.put('/api/doctors/:id', authMiddleware, async (req, res) => {
-    const { id } = req.params; // This is now the unique doctor_id from doctors_identities
-    const { clinicIds, specialty, email, color, status, password } = req.body;
 
+app.put('/api/doctors/:id', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const { clinicIds, specialty, email, color, status, password } = req.body;
     if (!Array.isArray(clinicIds)) {
         return res.status(400).json({ message: 'clinicIds must be an array.' });
     }
-
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
-
-        // Step 1: Update the central doctor identity record
         let passwordHash;
         if (password) {
             const salt = await bcrypt.genSalt(10);
@@ -162,27 +158,17 @@ app.put('/api/doctors/:id', authMiddleware, async (req, res) => {
                 [specialty, email, color, status, id]
             );
         }
-        
-        // Step 2: Reconcile clinic assignments
-        // Get current assignments
         const { rows: currentAssignments } = await client.query('SELECT clinic_id FROM doctor_clinic_assignments WHERE doctor_id = $1', [id]);
         const currentClinicIds = currentAssignments.map(a => a.clinic_id);
-
-        // Determine which to add and remove
         const clinicsToAdd = clinicIds.filter(cid => !currentClinicIds.includes(cid));
         const clinicsToRemove = currentClinicIds.filter(cid => !clinicIds.includes(cid));
-
-        // Remove old assignments
         if (clinicsToRemove.length > 0) {
             await client.query('DELETE FROM doctor_clinic_assignments WHERE doctor_id = $1 AND clinic_id = ANY($2::int[])', [id, clinicsToRemove]);
         }
-
-        // Add new assignments
         const addPromises = clinicsToAdd.map(clinicId => {
             return client.query('INSERT INTO doctor_clinic_assignments (doctor_id, clinic_id) VALUES ($1, $2)', [id, clinicId]);
         });
         await Promise.all(addPromises);
-
         await client.query('COMMIT');
         res.json({ message: `Doctor assignments updated successfully.` });
     } catch (err) {
@@ -197,7 +183,42 @@ app.put('/api/doctors/:id', authMiddleware, async (req, res) => {
     }
 });
 
+// --- Patient Endpoints ---
+app.post('/api/patients', authMiddleware, async (req, res) => {
+    const {
+        dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th,
+        title_en, first_name_en, last_name_en, nickname, gender, date_of_birth,
+        chronic_diseases, allergies, mobile_phone, home_phone, line_id, email,
+        address, sub_district, district, province, country, zip_code
+    } = req.body;
+    try {
+        const { rows } = await db.query(
+            `INSERT INTO patients (dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th, title_en, first_name_en, last_name_en, nickname, gender, date_of_birth, chronic_diseases, allergies, mobile_phone, home_phone, line_id, email, address, sub_district, district, province, country, zip_code)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25) RETURNING *`,
+            [dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th, title_en, first_name_en, last_name_en, nickname, gender, date_of_birth, chronic_diseases, allergies, mobile_phone, home_phone, line_id, email, address, sub_district, district, province, country, zip_code]
+        );
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        console.error("Error in POST /api/patients:", err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
 
+app.get('/api/patients', authMiddleware, async (req, res) => {
+    const { query } = req.query;
+    try {
+        const search_query = `%${query}%`;
+        const { rows } = await db.query(
+            `SELECT patient_id, dn, dn_old, first_name_th, last_name_th, mobile_phone FROM patients
+             WHERE first_name_th ILIKE $1 OR last_name_th ILIKE $1 OR mobile_phone ILIKE $1 OR dn ILIKE $1`,
+            [search_query]
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error("Error in GET /api/patients:", err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
 // Note: Other endpoints below are simplified as they mostly rely on doctor_id, which we migrated.
 // ... (rest of the file remains largely the same, but ensure doctor_id is referenced correctly)
 
