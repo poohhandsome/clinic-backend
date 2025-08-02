@@ -3,9 +3,9 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const bcrypt = require('bcrypt');
+const bcrypt = 'bcrypt';
 const jwt = require('jsonwebtoken');
-const { format, addMonths, startOfMonth, getDay, eachDayOfInterval, addDays, endOfMonth } = require('date-fns');
+const { format, addMonths, startOfMonth, getDay, eachDayOfInterval, addDays, endOfMonth, getWeekOfMonth } = require('date-fns');
 const db = require('./db');
 
 const app = express();
@@ -21,7 +21,7 @@ app.post('/api/login', async (req, res) => {
         const { rows } = await db.query('SELECT * FROM workers WHERE username = $1', [username]);
         if (rows.length === 0) return res.status(400).json({ msg: 'Invalid credentials' });
         const user = rows[0];
-        const isMatch = await bcrypt.compare(password, user.password_hash);
+        const isMatch = await require('bcrypt').compare(password, user.password_hash);
         if (!isMatch) return res.status(400).json({ msg: 'Invalid credentials' });
         const payload = { user: { id: user.id, username: user.username } };
         jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '12h' }, (err, token) => {
@@ -109,8 +109,8 @@ app.post('/api/doctors', authMiddleware, async (req, res) => {
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
-        const salt = await bcrypt.genSalt(10);
-        const passwordHash = await bcrypt.hash(password, salt);
+        const salt = await require('bcrypt').genSalt(10);
+        const passwordHash = await require('bcrypt').hash(password, salt);
 
         const insertPromises = clinicIds.map(clinicId => {
             return client.query(
@@ -159,8 +159,8 @@ app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
         );
         
         if (password) {
-            const salt = await bcrypt.genSalt(10);
-            const passwordHash = await bcrypt.hash(password, salt);
+            const salt = await require('bcrypt').genSalt(10);
+            const passwordHash = await require('bcrypt').hash(password, salt);
             await client.query('UPDATE doctors SET password_hash = $1 WHERE full_name = $2', [passwordHash, fullName]);
         }
 
@@ -193,20 +193,59 @@ app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
     }
 });
 
+// ***************************************************************
+// ** MODIFIED: Schedule calculation now includes rules **
+// ***************************************************************
 app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     const { clinic_id, date } = req.query;
     if (!clinic_id || !date) return res.status(400).json({ msg: 'Clinic ID and date are required' });
 
     try {
-        const dayOfWeek = new Date(date).getDay();
-        const allDoctorsResult = await db.query('SELECT doctor_id AS id, full_name AS name FROM doctors WHERE clinic_id = $1 ORDER BY full_name', [clinic_id]);
-        const workingDoctorsResult = await db.query(
-            `SELECT d.doctor_id AS id, d.full_name AS name, d.specialty, da.start_time, da.end_time
-             FROM doctors d JOIN doctor_availability da ON d.doctor_id = da.doctor_id
-             WHERE d.clinic_id = $1 AND da.day_of_week = $2 ORDER BY d.full_name`,
-            [clinic_id, dayOfWeek]
+        const targetDate = new Date(date);
+        const dayOfWeek = getDay(targetDate);
+        const weekOfMonth = getWeekOfMonth(targetDate);
+
+        // Base weekly schedule
+        let query = `
+            SELECT d.doctor_id AS id, d.full_name AS name, d.specialty, da.start_time, da.end_time
+            FROM doctors d
+            JOIN doctor_availability da ON d.doctor_id = da.doctor_id
+            WHERE d.clinic_id = $1 AND da.day_of_week = $2 AND d.status = 'active'
+        `;
+        const { rows: weeklyDoctors } = await db.query(query, [clinic_id, dayOfWeek]);
+
+        // Recurring rules for the specific week and day
+        query = `
+            SELECT d.doctor_id AS id, d.full_name AS name, d.specialty, dr.start_time, dr.end_time
+            FROM doctors d
+            JOIN doctor_availability_rules dr ON d.doctor_id = dr.doctor_id
+            WHERE d.clinic_id = $1 AND dr.day_of_week = $2 AND $3 = ANY(dr.weeks_of_month) AND d.status = 'active'
+        `;
+        const { rows: ruleDoctors } = await db.query(query, [clinic_id, dayOfWeek, weekOfMonth]);
+
+        // Combine and deduplicate doctors, giving precedence to recurring rules
+        const workingDoctorsMap = new Map();
+        [...weeklyDoctors, ...ruleDoctors].forEach(doc => workingDoctorsMap.set(doc.id, doc));
+        const workingDoctors = Array.from(workingDoctorsMap.values());
+        
+        // Specific day overrides (vacations, etc.)
+        const { rows: specialSchedules } = await db.query(
+            `SELECT doctor_id, is_available FROM special_schedules WHERE schedule_date = $1`, [date]
         );
-        const appointmentsResult = await db.query(
+
+        // Filter out doctors who are unavailable
+        const finalWorkingDoctors = workingDoctors.filter(doc => {
+            const special = specialSchedules.find(s => s.doctor_id === doc.id);
+            return !special || special.is_available;
+        });
+
+        // Fetch all doctors for the clinic for UI purposes
+        const { rows: allDoctors } = await db.query(
+            'SELECT doctor_id AS id, full_name AS name FROM doctors WHERE clinic_id = $1 ORDER BY full_name', [clinic_id]
+        );
+
+        // Fetch confirmed appointments
+        const { rows: appointments } = await db.query(
             `SELECT a.appointment_id AS id, a.doctor_id, a.customer_id,
                     TO_CHAR(a.appointment_time, 'HH24:MI') AS appointment_time,
                     TO_CHAR(a.appointment_time + INTERVAL '30 minutes', 'HH24:MI') AS end_time,
@@ -215,16 +254,19 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
              WHERE a.clinic_id = $1 AND DATE(a.appointment_time) = $2 AND LOWER(a.status) = 'confirmed'`,
             [clinic_id, date]
         );
+
         res.json({
-            doctors: workingDoctorsResult.rows,
-            all_doctors_in_clinic: allDoctorsResult.rows,
-            appointments: appointmentsResult.rows,
+            doctors: finalWorkingDoctors,
+            all_doctors_in_clinic: allDoctors,
+            appointments: appointments,
         });
+
     } catch (err) {
         console.error("Error in /api/clinic-day-schedule:", err.message);
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
+
 
 app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
@@ -237,7 +279,8 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
         const allDoctorIds = doctorRecords.rows.map(r => r.doctor_id);
 
         const availabilityResult = await db.query('SELECT doctor_id, day_of_week, start_time, end_time FROM doctor_availability WHERE doctor_id = ANY($1::int[])', [allDoctorIds]);
-        const specialSchedulesResult = await db.query('SELECT doctor_id, schedule_date, start_time, end_time, is_available FROM special_schedules WHERE doctor_id = ANY($1::int[])', [allDoctorIds]);
+        const rulesResult = await db.query('SELECT doctor_id, day_of_week, weeks_of_month, start_time, end_time FROM doctor_availability_rules WHERE doctor_id = ANY($1::int[])', [allDoctorIds]);
+        const specialSchedulesResult = await db.query('SELECT doctor_id, schedule_date, is_available FROM special_schedules WHERE doctor_id = ANY($1::int[])', [allDoctorIds]);
 
         const scheduleMap = new Map();
         const startDate = new Date();
@@ -246,31 +289,34 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
         eachDayOfInterval({ start: startDate, end: endDate }).forEach(day => {
             const dayOfWeek = getDay(day);
             const dateString = format(day, 'yyyy-MM-dd');
-            availabilityResult.rows.forEach(avail => {
-                if (avail.day_of_week === dayOfWeek) {
-                    const docInfo = doctorRecords.rows.find(d => d.doctor_id === avail.doctor_id);
-                    if (docInfo) {
-                        scheduleMap.set(dateString, {
-                            date: dateString, isAvailable: true, startTime: avail.start_time, endTime: avail.end_time,
-                            clinicId: docInfo.clinic_id, clinicName: docInfo.clinic_name
-                        });
-                    }
-                }
-            });
-        });
+            const weekOfMonth = getWeekOfMonth(day);
+            let isWorking = false;
+            let schedule = {};
 
-        specialSchedulesResult.rows.forEach(special => {
-            const dateString = format(special.schedule_date, 'yyyy-MM-dd');
-            if (special.is_available) {
-                const docInfo = doctorRecords.rows.find(d => d.doctor_id === special.doctor_id);
-                if (docInfo) {
-                     scheduleMap.set(dateString, {
-                        date: dateString, isAvailable: true, startTime: special.start_time, endTime: special.end_time,
-                        clinicId: docInfo.clinic_id, clinicName: docInfo.clinic_name
-                    });
-                }
-            } else {
-                scheduleMap.delete(dateString); 
+            // 1. Check for weekly availability
+            const weeklyAvail = availabilityResult.rows.find(a => a.day_of_week === dayOfWeek && doctorRecords.some(d => d.doctor_id === a.doctor_id));
+            if (weeklyAvail) {
+                isWorking = true;
+                const docInfo = doctorRecords.find(d => d.doctor_id === weeklyAvail.doctor_id);
+                schedule = { startTime: weeklyAvail.start_time, endTime: weeklyAvail.end_time, clinicId: docInfo.clinic_id, clinicName: docInfo.clinic_name };
+            }
+
+            // 2. Check for recurring rule (overrides weekly)
+            const rule = rulesResult.rows.find(r => r.day_of_week === dayOfWeek && r.weeks_of_month.includes(weekOfMonth));
+             if (rule) {
+                isWorking = true;
+                const docInfo = doctorRecords.find(d => d.doctor_id === rule.doctor_id);
+                schedule = { startTime: rule.start_time, endTime: rule.end_time, clinicId: docInfo.clinic_id, clinicName: docInfo.clinic_name };
+            }
+            
+            // 3. Check for specific day off (overrides all)
+            const special = specialSchedulesResult.rows.find(s => format(s.schedule_date, 'yyyy-MM-dd') === dateString);
+            if(special && !special.is_available) {
+                isWorking = false;
+            }
+
+            if(isWorking) {
+                scheduleMap.set(dateString, { date: dateString, ...schedule });
             }
         });
 
@@ -286,16 +332,16 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     try {
-        const query = `
-            SELECT da.id, da.day_of_week, da.start_time, da.end_time, d.clinic_id
-            FROM doctor_availability da JOIN doctors d ON da.doctor_id = d.doctor_id
-            WHERE d.full_name = (SELECT full_name FROM doctors WHERE doctor_id = $1)
-        `;
-        const { rows } = await db.query(query, [doctor_id]);
+        const { rows } = await db.query(
+            `SELECT da.id, da.day_of_week, da.start_time, da.end_time, d.clinic_id
+             FROM doctor_availability da JOIN doctors d ON da.doctor_id = d.doctor_id
+             WHERE d.full_name = (SELECT full_name FROM doctors WHERE doctor_id = $1)`,
+            [doctor_id]
+        );
         res.json(rows);
     } catch (err) {
         console.error(err.message);
-        res.status(500).json({ message: err.message || 'Server Error' });
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -304,25 +350,23 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
     const { availability } = req.body;
     const client = await db.pool.connect();
     try {
-        const nameResult = await client.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [doctor_id]);
-        if (nameResult.rows.length === 0) return res.status(404).send({ message: 'Doctor not found.' });
+        const { rows: nameResult } = await client.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [doctor_id]);
+        if (nameResult.length === 0) return res.status(404).send({ message: 'Doctor not found.' });
         
-        const doctorName = nameResult.rows[0].full_name;
-        const allDoctorRecordsResult = await client.query('SELECT doctor_id, clinic_id FROM doctors WHERE full_name = $1', [doctorName]);
-        const allDoctorIds = allDoctorRecordsResult.rows.map(r => r.doctor_id);
+        const doctorName = nameResult[0].full_name;
+        const { rows: doctorRecords } = await client.query('SELECT doctor_id, clinic_id FROM doctors WHERE full_name = $1', [doctorName]);
+        const allDoctorIds = doctorRecords.map(r => r.doctor_id);
 
         await client.query('BEGIN');
         await client.query('DELETE FROM doctor_availability WHERE doctor_id = ANY($1::int[])', [allDoctorIds]);
 
         for (const slot of availability) {
-            if (slot.start_time && slot.end_time && slot.clinic_id) {
-                const correspondingDoctor = allDoctorRecordsResult.rows.find(rec => rec.clinic_id === slot.clinic_id);
-                if (correspondingDoctor) {
-                    await client.query(
-                        'INSERT INTO doctor_availability (doctor_id, day_of_week, start_time, end_time) VALUES ($1, $2, $3, $4)',
-                        [correspondingDoctor.doctor_id, slot.day_of_week, slot.start_time, slot.end_time]
-                    );
-                }
+            const correspondingDoctor = doctorRecords.find(rec => rec.clinic_id === slot.clinic_id);
+            if (correspondingDoctor) {
+                await client.query(
+                    'INSERT INTO doctor_availability (doctor_id, day_of_week, start_time, end_time) VALUES ($1, $2, $3, $4)',
+                    [correspondingDoctor.doctor_id, slot.day_of_week, slot.start_time, slot.end_time]
+                );
             }
         }
         
@@ -337,7 +381,65 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
     }
 });
 
-// --- Other Endpoints (Unchanged) ---
+
+// ***************************************************************
+// ** NEW ENDPOINTS for Recurring Rules **
+// ***************************************************************
+app.get('/api/doctor-rules/:doctor_id', authMiddleware, async(req, res) => {
+    const { doctor_id } = req.params;
+     try {
+        const { rows } = await db.query(
+            `SELECT r.id, r.day_of_week, r.weeks_of_month, r.start_time, r.end_time, r.clinic_id, c.name as clinic_name
+             FROM doctor_availability_rules r
+             JOIN clinics c ON r.clinic_id = c.clinic_id
+             WHERE r.doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = (SELECT full_name FROM doctors WHERE doctor_id = $1))`,
+            [doctor_id]
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+app.post('/api/doctor-rules/:doctor_id', authMiddleware, async(req, res) => {
+    const { doctor_id } = req.params;
+    const { clinic_id, day_of_week, weeks_of_month, start_time, end_time } = req.body;
+
+    try {
+        const { rows: nameResult } = await db.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [doctor_id]);
+        if (nameResult.length === 0) return res.status(404).json({ message: 'Doctor not found.' });
+        const doctorName = nameResult[0].full_name;
+
+        const { rows: specificDoctorResult } = await db.query('SELECT doctor_id FROM doctors WHERE full_name = $1 AND clinic_id = $2', [doctorName, clinic_id]);
+        if (specificDoctorResult.length === 0) return res.status(400).json({ message: 'Doctor is not assigned to this clinic.'});
+        
+        const specificDoctorId = specificDoctorResult[0].doctor_id;
+
+        await db.query(
+            'INSERT INTO doctor_availability_rules (doctor_id, clinic_id, day_of_week, weeks_of_month, start_time, end_time) VALUES ($1, $2, $3, $4, $5, $6)',
+            [specificDoctorId, clinic_id, day_of_week, weeks_of_month, start_time, end_time]
+        );
+        res.status(201).json({ message: 'Rule created successfully.' });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+app.delete('/api/doctor-rules/:rule_id', authMiddleware, async(req, res) => {
+    const { rule_id } = req.params;
+    try {
+        await db.query('DELETE FROM doctor_availability_rules WHERE id = $1', [rule_id]);
+        res.status(200).json({ message: 'Rule deleted successfully.' });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+
+// --- Other Endpoints ---
 app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     const { clinic_id } = req.query;
     try {
@@ -421,6 +523,7 @@ app.get('/api/special-schedules/:doctor_id', authMiddleware, async (req, res) =>
                    ss.start_time, ss.end_time, ss.is_available
             FROM special_schedules ss JOIN clinics c ON ss.clinic_id = c.clinic_id
             WHERE ss.doctor_id IN (SELECT d2.doctor_id FROM doctors d2 WHERE d2.full_name = (SELECT d3.full_name FROM doctors d3 WHERE d3.doctor_id = $1))
+              AND ss.is_available = false
             ORDER BY ss.schedule_date DESC;
         `;
         const { rows } = await db.query(query, [doctor_id]);
@@ -431,12 +534,9 @@ app.get('/api/special-schedules/:doctor_id', authMiddleware, async (req, res) =>
     }
 });
 
-// ***************************************************************
-// ** CORRECTED: Handles specific dates and recurring rules for "Days ON" **
-// ***************************************************************
 app.post('/api/special-schedules', authMiddleware, async (req, res) => {
-    const { doctor_id, clinic_id, schedule_date, start_time, end_time, is_available, rule } = req.body;
-    if (!doctor_id || !clinic_id) return res.status(400).json({ message: 'Doctor and clinic are required.' });
+    const { doctor_id, clinic_id, schedule_date, is_available } = req.body;
+    if (!doctor_id || !clinic_id || !schedule_date) return res.status(400).json({ message: 'Doctor, clinic, and date are required.' });
 
     const client = await db.pool.connect();
     try {
@@ -448,49 +548,22 @@ app.post('/api/special-schedules', authMiddleware, async (req, res) => {
         if (specificDoctorIdResult.rows.length === 0) return res.status(404).send({ message: 'Doctor is not assigned to this clinic.' });
         const specificDoctorId = specificDoctorIdResult.rows[0].doctor_id;
 
-        await client.query('BEGIN');
+        await client.query(
+            `INSERT INTO special_schedules (doctor_id, clinic_id, schedule_date, is_available)
+             VALUES ($1, $2, $3, $4) ON CONFLICT (doctor_id, schedule_date) DO UPDATE SET is_available = EXCLUDED.is_available`,
+            [specificDoctorId, clinic_id, schedule_date, is_available]
+        );
         
-        let datesToInsert = [];
-        if (rule) {
-            const { week, day } = rule;
-            const year = new Date().getFullYear();
-            for (let month = 0; month < 12; month++) {
-                const firstDayOfMonth = new Date(year, month, 1);
-                let firstOccurrence = startOfMonth(firstDayOfMonth);
-                while (getDay(firstOccurrence) !== day) {
-                    firstOccurrence = addDays(firstOccurrence, 1);
-                }
-                const targetDate = addDays(firstOccurrence, (week - 1) * 7);
-                if (targetDate.getMonth() === month) {
-                    datesToInsert.push(format(targetDate, 'yyyy-MM-dd'));
-                }
-            }
-        } else if (schedule_date) {
-            datesToInsert.push(schedule_date);
-        }
-
-        if (datesToInsert.length === 0) return res.status(400).json({ message: 'No valid dates found for the given rule.' });
-
-        const insertPromises = datesToInsert.map(date => {
-            return client.query(
-                `INSERT INTO special_schedules (doctor_id, clinic_id, schedule_date, start_time, end_time, is_available)
-                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (doctor_id, schedule_date) DO UPDATE SET is_available = EXCLUDED.is_available, start_time = EXCLUDED.start_time, end_time = EXCLUDED.end_time`,
-                [specificDoctorId, clinic_id, date, start_time, end_time, is_available]
-            );
-        });
-        
-        await Promise.all(insertPromises);
-        await client.query('COMMIT');
-        res.status(201).json({ message: 'Special schedule(s) created successfully.' });
+        res.status(201).json({ message: 'Special schedule created successfully.' });
 
     } catch (err) {
-        await client.query('ROLLBACK');
         console.error("Error in POST /api/special-schedules:", err.message);
         res.status(500).json({ message: 'Server Error' });
     } finally {
         client.release();
     }
 });
+
 
 app.delete('/api/special-schedules/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
