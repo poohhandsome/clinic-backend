@@ -1,3 +1,5 @@
+// index.js (REPLACE)
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -57,14 +59,18 @@ app.get('/api/clinics', authMiddleware, async (req, res) => {
 });
 
 // ***************************************************************
-// ** REINSTATED AND CORRECTED: Get unique doctors and all their clinics **
+// ** MODIFIED: Get unique doctors with new fields (status, color, etc.) **
 // ***************************************************************
 app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
     try {
         const query = `
             SELECT
                 d.full_name AS name,
-                MIN(d.doctor_id) AS id, -- Use an aggregate to get one ID for the group
+                MIN(d.doctor_id) AS id,
+                MIN(d.specialty) as specialty,
+                MIN(d.status) as status,
+                MIN(d.color) as color,
+                MIN(d.email) as email,
                 json_agg(json_build_object('id', c.clinic_id, 'name', c.name)) as clinics
             FROM doctors d
             JOIN clinics c ON d.clinic_id = c.clinic_id
@@ -97,21 +103,30 @@ app.get('/api/doctors', authMiddleware, async (req, res) => {
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
+
+// ***************************************************************
+// ** MODIFIED: Create doctor with new fields **
+// ***************************************************************
 app.post('/api/doctors', authMiddleware, async (req, res) => {
-    const { fullName, specialty, clinicIds } = req.body;
-    if (!fullName || !clinicIds || !Array.isArray(clinicIds) || clinicIds.length === 0) {
-        return res.status(400).json({ message: 'Full name and at least one clinic ID are required.' });
+    const { fullName, specialty, clinicIds, email, password, color, status } = req.body;
+
+    if (!fullName || !clinicIds || !Array.isArray(clinicIds) || clinicIds.length === 0 || !email || !password) {
+        return res.status(400).json({ message: 'Full name, clinic(s), email, and password are required.' });
     }
 
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
 
+        // Hash the password
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash(password, salt);
+
         // Create a separate row for each clinic assignment
         const insertPromises = clinicIds.map(clinicId => {
             return client.query(
-                'INSERT INTO doctors (full_name, specialty, clinic_id) VALUES ($1, $2, $3)',
-                [fullName.trim(), specialty || null, clinicId]
+                'INSERT INTO doctors (full_name, specialty, clinic_id, email, password_hash, color, status) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+                [fullName.trim(), specialty || null, clinicId, email, passwordHash, color || null, status || 'active']
             );
         });
 
@@ -122,16 +137,20 @@ app.post('/api/doctors', authMiddleware, async (req, res) => {
         await client.query('ROLLBACK');
         console.error("Error in POST /api/doctors:", err.message);
         if (err.code === '23505') { // Handles unique constraint violation
-            return res.status(409).json({ message: 'This doctor is already assigned to one of the selected clinics.' });
+            return res.status(409).json({ message: 'A doctor with this email or clinic assignment already exists.' });
         }
         res.status(500).json({ message: err.message || 'Server Error' });
     } finally {
         client.release();
     }
 });
+
+// ***************************************************************
+// ** MODIFIED: Update doctor with new fields **
+// ***************************************************************
 app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
     const { id } = req.params; // This is a representative ID
-    const { clinicIds, specialty } = req.body;
+    const { clinicIds, specialty, email, color, status, password } = req.body;
 
     if (!Array.isArray(clinicIds)) {
         return res.status(400).json({ message: 'clinicIds must be an array.' });
@@ -141,7 +160,6 @@ app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // First, get the doctor's full name from the representative ID
         const nameResult = await client.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [id]);
         if (nameResult.rows.length === 0) {
             await client.query('ROLLBACK');
@@ -149,27 +167,34 @@ app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
         }
         const fullName = nameResult.rows[0].full_name;
 
-        // Update specialty on all existing records for this doctor
-        await client.query('UPDATE doctors SET specialty = $1 WHERE full_name = $2', [specialty, fullName]);
+        // Update non-password fields on all existing records for this doctor
+        await client.query(
+            'UPDATE doctors SET specialty = $1, email = $2, color = $3, status = $4 WHERE full_name = $5',
+            [specialty, email, color, status, fullName]
+        );
+        
+        // If a new password is provided, hash it and update it
+        if (password) {
+            const salt = await bcrypt.genSalt(10);
+            const passwordHash = await bcrypt.hash(password, salt);
+            await client.query('UPDATE doctors SET password_hash = $1 WHERE full_name = $2', [passwordHash, fullName]);
+        }
 
-        // Get all current clinic assignments for this doctor
         const currentAssignmentsResult = await client.query('SELECT doctor_id, clinic_id FROM doctors WHERE full_name = $1', [fullName]);
         const currentClinicIds = currentAssignmentsResult.rows.map(a => a.clinic_id);
         
-        // Find clinics to add and doctor_ids to remove
         const clinicsToAdd = clinicIds.filter(cid => !currentClinicIds.includes(cid));
         const doctorIdsToRemove = currentAssignmentsResult.rows
             .filter(a => !clinicIds.includes(a.clinic_id))
             .map(a => a.doctor_id);
 
-        // Remove old assignments
         if (doctorIdsToRemove.length > 0) {
             await client.query('DELETE FROM doctors WHERE doctor_id = ANY($1::int[])', [doctorIdsToRemove]);
         }
 
-        // Add new assignments
         const addPromises = clinicsToAdd.map(clinicId => {
-            return client.query('INSERT INTO doctors (full_name, specialty, clinic_id) VALUES ($1, $2, $3)', [fullName, specialty, clinicId]);
+            return client.query('INSERT INTO doctors (full_name, specialty, clinic_id, email, color, status) VALUES ($1, $2, $3, $4, $5, $6)', 
+            [fullName, specialty, clinicId, email, color, status]);
         });
         await Promise.all(addPromises);
 
@@ -183,6 +208,7 @@ app.put('/api/doctors/:id/clinics', authMiddleware, async (req, res) => {
         client.release();
     }
 });
+
 
 // This endpoint gets the schedule, which is now simple and does NOT involve special schedules.
 app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
