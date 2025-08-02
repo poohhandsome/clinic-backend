@@ -433,10 +433,7 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
-
-// ***************************************************************
-// ** NEW ENDPOINT: Fetches ALL appointments for a date range **
-// ***************************************************************
+// --- Appointment & Schedule Endpoints ---
 app.get('/api/all-appointments', authMiddleware, async (req, res) => {
     const { clinic_id, startDate, endDate } = req.query;
     try {
