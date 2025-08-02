@@ -14,6 +14,7 @@ const port = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+// --- Authentication Routes ---
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     try {
@@ -56,9 +57,6 @@ app.get('/api/clinics', authMiddleware, async (req, res) => {
     }
 });
 
-// ***************************************************************
-// ** REWRITTEN: Fetches doctors from the new normalized tables **
-// ***************************************************************
 app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
     try {
         const query = `
@@ -84,45 +82,34 @@ app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
     }
 });
 
-// ***************************************************************
-// ** REWRITTEN: Add new doctor to the new normalized tables **
-// ***************************************************************
 app.post('/api/doctors', authMiddleware, async (req, res) => {
     const { fullName, specialty, clinicIds, email, password, color, status } = req.body;
-
     if (!fullName || !clinicIds || !Array.isArray(clinicIds) || clinicIds.length === 0 || !email || !password) {
         return res.status(400).json({ message: 'Full name, clinic(s), email, and password are required.' });
     }
-
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
-
         const salt = await bcrypt.genSalt(10);
         const passwordHash = await bcrypt.hash(password, salt);
-
-        // Step 1: Create the single doctor identity
         const identityResult = await client.query(
             'INSERT INTO doctors_identities (full_name, specialty, email, password_hash, color, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING doctor_id',
             [fullName.trim(), specialty || null, email, passwordHash, color || null, status || 'active']
         );
         const newDoctorId = identityResult.rows[0].doctor_id;
-
-        // Step 2: Create the clinic assignments
         const assignmentPromises = clinicIds.map(clinicId => {
             return client.query(
                 'INSERT INTO doctor_clinic_assignments (doctor_id, clinic_id) VALUES ($1, $2)',
                 [newDoctorId, clinicId]
             );
         });
-
         await Promise.all(assignmentPromises);
         await client.query('COMMIT');
         res.status(201).json({ message: `Doctor '${fullName}' created successfully.` });
     } catch (err) {
         await client.query('ROLLBACK');
         console.error("Error in POST /api/doctors:", err.message);
-        if (err.code === '23505') { // Handles unique constraint violation on email or assignment
+        if (err.code === '23505') {
             return res.status(409).json({ message: 'A doctor with this email already exists, or is already assigned to one of these clinics.' });
         }
         res.status(500).json({ message: 'Server Error' });
@@ -130,10 +117,6 @@ app.post('/api/doctors', authMiddleware, async (req, res) => {
         client.release();
     }
 });
-
-// ***************************************************************
-// ** REWRITTEN: Update doctor using the new normalized tables **
-// ***************************************************************
 
 app.put('/api/doctors/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
@@ -451,11 +434,43 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     }
 });
 
+// ***************************************************************
+// ** NEW ENDPOINT: Fetches ALL appointments for a date range **
+// ***************************************************************
+app.get('/api/all-appointments', authMiddleware, async (req, res) => {
+    const { clinic_id, startDate, endDate } = req.query;
+    try {
+        const { rows } = await db.query(`
+            SELECT 
+                a.appointment_id as id,
+                a.doctor_id,
+                TO_CHAR(a.appointment_time, 'YYYY-MM-DD') AS appointment_date,
+                TO_CHAR(a.appointment_time, 'HH24:MI:SS') as booking_time,
+                a.status,
+                COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown Patient') as patient_name,
+                COALESCE(a.patient_phone_at_booking, c.phone_number, 'N/A') as phone_number,
+                di.full_name as doctor_name
+            FROM appointments a
+            JOIN doctors_identities di ON a.doctor_id = di.doctor_id
+            LEFT JOIN customers c ON a.customer_id = c.customer_id
+            WHERE a.clinic_id = $1
+              AND DATE(a.appointment_time) BETWEEN $2 AND $3
+            ORDER BY a.appointment_time
+        `, [clinic_id, startDate, endDate]);
+        res.json(rows);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+
 app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
     const { clinic_id, startDate, endDate } = req.query;
     try {
         const { rows } = await db.query(`
-            SELECT a.appointment_id as id, TO_CHAR(a.appointment_time, 'YYYY-MM-DD') AS appointment_date,
+            SELECT a.appointment_id as id, a.doctor_id,
+                   TO_CHAR(a.appointment_time, 'YYYY-MM-DD') AS appointment_date,
                    TO_CHAR(a.appointment_time, 'HH24:MI:SS') as booking_time, a.status,
                    COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown Patient') as patient_name,
                    COALESCE(a.patient_phone_at_booking, c.phone_number, 'N/A') as phone_number,
