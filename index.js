@@ -413,24 +413,42 @@ app.delete('/api/doctor-rules/:rule_id', authMiddleware, async(req, res) => {
 });
 
 
-// --- Other Endpoints ---
+// ***************************************************************
+// ** REWRITTEN: Fetches detailed pending appointments **
+// ***************************************************************
 app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     const { clinic_id } = req.query;
     try {
-        const { rows } = await db.query(`
-            SELECT a.appointment_id AS id, TO_CHAR(a.appointment_time, 'YYYY-MM-DD') AS appointment_date,
-                   TO_CHAR(a.appointment_time, 'HH24:MI:SS') AS appointment_time, 
-                   COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown Patient') AS patient_name, 
-                   di.full_name AS doctor_name 
-            FROM appointments a 
+        const query = `
+            SELECT 
+                a.appointment_id AS id,
+                a.doctor_id,
+                a.clinic_id,
+                a.customer_id,
+                TO_CHAR(a.appointment_time, 'YYYY-MM-DD') AS appointment_date,
+                TO_CHAR(a.appointment_time, 'HH24:MI:SS') AS appointment_time,
+                a.status,
+                a.purpose,
+                a.room_id,
+                COALESCE(a.patient_name_at_booking, p.first_name_th || ' ' || p.last_name_th, c.display_name, 'Unknown') as patient_name,
+                p.dn,
+                p.mobile_phone,
+                c.line_user_id as line_id,
+                di.full_name AS doctor_name,
+                r.room_name
+            FROM appointments a
             JOIN doctors_identities di ON a.doctor_id = di.doctor_id
-            LEFT JOIN customers c ON a.customer_id = c.customer_id 
+            LEFT JOIN customers c ON a.customer_id = c.customer_id
+            LEFT JOIN patients p ON c.line_user_id = p.line_id -- This join might need adjustment based on your schema
+            LEFT JOIN rooms r ON a.room_id = r.room_id
             WHERE a.clinic_id = $1 AND LOWER(a.status) = 'pending_confirmation'
-        `, [clinic_id]);
+            ORDER BY a.appointment_time;
+        `;
+        const { rows } = await db.query(query, [clinic_id]);
         res.json(rows);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ message: err.message || 'Server Error' });
+        console.error("Error fetching pending appointments:", err.message);
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 // --- Appointment & Schedule Endpoints ---
