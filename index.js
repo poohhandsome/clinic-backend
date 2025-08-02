@@ -264,14 +264,16 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     }
 });
 
-
+// ***************************************************************
+// ** CORRECTED: Fixed "doctorRecords.some is not a function" bug **
+// ***************************************************************
 app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res) => {
-    const { doctor_id } = req.params;
     try {
+        const { doctor_id } = req.params;
         const nameResult = await db.query('SELECT full_name FROM doctors WHERE doctor_id = $1', [doctor_id]);
         if (nameResult.rows.length === 0) return res.status(404).json({ message: 'Doctor not found.' });
-        const doctorName = nameResult.rows[0].full_name;
         
+        const doctorName = nameResult.rows[0].full_name;
         const doctorRecords = await db.query('SELECT d.doctor_id, d.clinic_id, c.name as clinic_name FROM doctors d JOIN clinics c ON d.clinic_id = c.clinic_id WHERE d.full_name = $1', [doctorName]);
         const allDoctorIds = doctorRecords.rows.map(r => r.doctor_id);
 
@@ -290,23 +292,20 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
             let isWorking = false;
             let schedule = {};
 
-            // 1. Check for weekly availability
-            const weeklyAvail = availabilityResult.rows.find(a => a.day_of_week === dayOfWeek && doctorRecords.some(d => d.doctor_id === a.doctor_id));
+            const weeklyAvail = availabilityResult.rows.find(a => a.day_of_week === dayOfWeek && doctorRecords.rows.some(d => d.doctor_id === a.doctor_id));
             if (weeklyAvail) {
                 isWorking = true;
-                const docInfo = doctorRecords.find(d => d.doctor_id === weeklyAvail.doctor_id);
+                const docInfo = doctorRecords.rows.find(d => d.doctor_id === weeklyAvail.doctor_id);
                 schedule = { startTime: weeklyAvail.start_time, endTime: weeklyAvail.end_time, clinicId: docInfo.clinic_id, clinicName: docInfo.clinic_name };
             }
 
-            // 2. Check for recurring rule (overrides weekly)
             const rule = rulesResult.rows.find(r => r.day_of_week === dayOfWeek && r.weeks_of_month.includes(weekOfMonth));
              if (rule) {
                 isWorking = true;
-                const docInfo = doctorRecords.find(d => d.doctor_id === rule.doctor_id);
+                const docInfo = doctorRecords.rows.find(d => d.doctor_id === rule.doctor_id);
                 schedule = { startTime: rule.start_time, endTime: rule.end_time, clinicId: docInfo.clinic_id, clinicName: docInfo.clinic_name };
             }
             
-            // 3. Check for specific day off (overrides all)
             const special = specialSchedulesResult.rows.find(s => format(s.schedule_date, 'yyyy-MM-dd') === dateString);
             if(special && !special.is_available) {
                 isWorking = false;
@@ -326,9 +325,7 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
     }
 });
 
-// ***************************************************************
-// ** CORRECTED: Added clinic_name to the query **
-// ***************************************************************
+
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     try {
@@ -360,8 +357,6 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
         const { rows: doctorRecords } = await client.query('SELECT doctor_id, clinic_id FROM doctors WHERE full_name = $1', [doctorName]);
         
         await client.query('BEGIN');
-        // This is a simplified add - it doesn't clear old schedules.
-        // For a full "save" functionality, we would delete existing rows first.
         for (const slot of availability) {
             const correspondingDoctor = doctorRecords.find(rec => rec.clinic_id === slot.clinic_id);
             if (correspondingDoctor) {
