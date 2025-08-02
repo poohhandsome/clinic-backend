@@ -464,24 +464,72 @@ app.get('/api/all-appointments', authMiddleware, async (req, res) => {
 // ***************************************************************
 // ** NEW ENDPOINT: Update any detail of an appointment **
 // ***************************************************************
-app.put('/api/appointments/:id', authMiddleware, async (req, res) => {
+app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
-    const { doctor_id, appointment_date, appointment_time, status } = req.body;
+    const { status, doctor_id, appointment_date, appointment_time, purpose, room_id, confirmation_notes } = req.body;
+    
     try {
-        const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
-        const { rows } = await db.query(
-            `UPDATE appointments 
-             SET doctor_id = $1, appointment_time = $2, status = $3
-             WHERE appointment_id = $4 RETURNING *`,
-            [doctor_id, appointmentTimestamp, status, id]
-        );
+        // Build the query dynamically to only update fields that are provided
+        const fields = [];
+        const values = [];
+        let query = 'UPDATE appointments SET ';
+
+        if (status) {
+            fields.push('status = $' + (fields.length + 1));
+            values.push(status);
+        }
+        if (doctor_id && appointment_date && appointment_time) {
+            const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
+            fields.push('doctor_id = $' + (fields.length + 1));
+            values.push(doctor_id);
+            fields.push('appointment_time = $' + (fields.length + 1));
+            values.push(appointmentTimestamp);
+        }
+        if (purpose) {
+            fields.push('purpose = $' + (fields.length + 1));
+            values.push(purpose);
+        }
+        if (room_id) {
+            fields.push('room_id = $' + (fields.length + 1));
+            values.push(room_id);
+        }
+        if (confirmation_notes) {
+            fields.push('confirmation_notes = $' + (fields.length + 1));
+            values.push(confirmation_notes);
+        }
+
+        if (fields.length === 0) {
+            return res.status(400).json({ message: 'No valid fields provided for update.' });
+        }
+
+        query += fields.join(', ');
+        query += ' WHERE appointment_id = $' + (fields.length + 1) + ' RETURNING *';
+        values.push(id);
+
+        const { rows } = await db.query(query, values);
         res.json(rows[0]);
     } catch (err) {
-        console.error("Error in PUT /api/appointments/:id:", err.message);
+        console.error("Error in PATCH /api/appointments/:id:", err.message);
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
+
+// ***************************************************************
+// ** NEW ENDPOINT: Get rooms for a specific clinic **
+// ***************************************************************
+app.get('/api/rooms', authMiddleware, async (req, res) => {
+    const { clinic_id } = req.query;
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'A clinic_id is required.' });
+    }
+    try {
+        const { rows } = await db.query('SELECT room_id, room_name FROM rooms WHERE clinic_id = $1 ORDER BY room_name', [clinic_id]);
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ message: err.message || 'Server error' });
+    }
+});
 
 app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
     const { clinic_id, startDate, endDate } = req.query;
