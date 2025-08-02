@@ -461,6 +461,27 @@ app.get('/api/all-appointments', authMiddleware, async (req, res) => {
     }
 });
 
+// ***************************************************************
+// ** NEW ENDPOINT: Update any detail of an appointment **
+// ***************************************************************
+app.put('/api/appointments/:id', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const { doctor_id, appointment_date, appointment_time, status } = req.body;
+    try {
+        const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
+        const { rows } = await db.query(
+            `UPDATE appointments 
+             SET doctor_id = $1, appointment_time = $2, status = $3
+             WHERE appointment_id = $4 RETURNING *`,
+            [doctor_id, appointmentTimestamp, status, id]
+        );
+        res.json(rows[0]);
+    } catch (err) {
+        console.error("Error in PUT /api/appointments/:id:", err.message);
+        res.status(500).json({ message: err.message || 'Server Error' });
+    }
+});
+
 
 app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
     const { clinic_id, startDate, endDate } = req.query;
