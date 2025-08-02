@@ -226,9 +226,6 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     }
 });
 
-// ***************************************************************
-// ** NEW ENDPOINT: Calculate a doctor's actual work schedule **
-// ***************************************************************
 app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     try {
@@ -435,7 +432,7 @@ app.get('/api/special-schedules/:doctor_id', authMiddleware, async (req, res) =>
 });
 
 // ***************************************************************
-// ** MODIFIED: Handle specific dates and recurring rules **
+// ** CORRECTED: Handles specific dates and recurring rules for "Days ON" **
 // ***************************************************************
 app.post('/api/special-schedules', authMiddleware, async (req, res) => {
     const { doctor_id, clinic_id, schedule_date, start_time, end_time, is_available, rule } = req.body;
