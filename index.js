@@ -457,28 +457,23 @@ app.get('/api/all-appointments', authMiddleware, async (req, res) => {
     try {
         const { rows } = await db.query(`
             SELECT 
-                a.appointment_id as id,
-                a.doctor_id,
+                a.appointment_id as id, a.doctor_id, a.clinic_id,
                 TO_CHAR(a.appointment_time, 'YYYY-MM-DD') AS appointment_date,
                 TO_CHAR(a.appointment_time, 'HH24:MI:SS') as booking_time,
-                a.status,
+                a.status, a.purpose, a.room_id,
                 COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown Patient') as patient_name,
-                COALESCE(a.patient_phone_at_booking, c.phone_number, 'N/A') as phone_number,
                 di.full_name as doctor_name
             FROM appointments a
             JOIN doctors_identities di ON a.doctor_id = di.doctor_id
             LEFT JOIN customers c ON a.customer_id = c.customer_id
-            WHERE a.clinic_id = $1
-              AND DATE(a.appointment_time) BETWEEN $2 AND $3
+            WHERE a.clinic_id = $1 AND DATE(a.appointment_time) BETWEEN $2 AND $3
             ORDER BY a.appointment_time
         `, [clinic_id, startDate, endDate]);
         res.json(rows);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ message: 'Server Error' });
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
-
 // ***************************************************************
 // ** NEW ENDPOINT: Update any detail of an appointment **
 // ***************************************************************
@@ -533,9 +528,27 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
 });
 
 
+
 // ***************************************************************
-// ** NEW ENDPOINT: Get rooms for a specific clinic **
+// ** NEW ENDPOINT: Create a new room for a clinic **
 // ***************************************************************
+app.post('/api/rooms', authMiddleware, async (req, res) => {
+    const { clinic_id, room_name } = req.body;
+    if (!clinic_id || !room_name) {
+        return res.status(400).json({ message: 'Clinic ID and room name are required.' });
+    }
+    try {
+        const { rows } = await db.query(
+            'INSERT INTO rooms (clinic_id, room_name) VALUES ($1, $2) RETURNING *',
+            [clinic_id, room_name]
+        );
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        console.error("Error in POST /api/rooms:", err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
 app.get('/api/rooms', authMiddleware, async (req, res) => {
     const { clinic_id } = req.query;
     if (!clinic_id) {
@@ -572,39 +585,56 @@ app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
     }
 });
 
-app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
-    const { id } = req.params;
-    const { status } = req.body;
-    try {
-        const { rows } = await db.query('UPDATE appointments SET status = $1 WHERE appointment_id = $2 RETURNING *', [status, id]);
-        res.json(rows[0]);
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ message: err.message || 'Server Error' });
-    }
-});
-
+// ***************************************************************
+// ** UPGRADED: Creates an appointment with optional room_id and purpose **
+// ***************************************************************
 app.post('/api/appointments', authMiddleware, async (req, res) => {
-    const { customer_id, doctor_id, clinic_id, appointment_date, appointment_time, status } = req.body;
-    if (!customer_id || !doctor_id || !clinic_id || !appointment_date || !appointment_time) {
+    const { customer_id, doctor_id, clinic_id, appointment_date, appointment_time, status, patient_name_at_booking, patient_phone_at_booking, purpose, room_id } = req.body;
+    if (!doctor_id || !clinic_id || !appointment_date || !appointment_time) {
         return res.status(400).json({ msg: 'Missing required appointment details.' });
     }
     try {
         const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
-        const { rows: customerRows } = await db.query('SELECT display_name, phone_number FROM customers WHERE customer_id = $1', [customer_id]);
-        const customerName = customerRows.length > 0 ? customerRows[0].display_name : 'N/A';
-        const customerPhone = customerRows.length > 0 ? customerRows[0].phone_number : 'N/A';
         const { rows } = await db.query(
-            `INSERT INTO appointments (customer_id, doctor_id, clinic_id, appointment_time, status, patient_name_at_booking, patient_phone_at_booking)
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-            [customer_id, doctor_id, clinic_id, appointmentTimestamp, status || 'confirmed', customerName, customerPhone]
+            `INSERT INTO appointments (customer_id, doctor_id, clinic_id, appointment_time, status, patient_name_at_booking, patient_phone_at_booking, purpose, room_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+            [customer_id, doctor_id, clinic_id, appointmentTimestamp, status || 'confirmed', patient_name_at_booking, patient_phone_at_booking, purpose || null, room_id || null]
         );
         res.status(201).json(rows[0]);
     } catch (err) {
-        console.error(err.message);
+        console.error("Error in POST /api/appointments:", err.message);
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
+
+app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const { status, doctor_id, appointment_date, appointment_time, purpose, room_id, confirmation_notes } = req.body;
+    try {
+        const fields = [];
+        const values = [];
+        let query = 'UPDATE appointments SET ';
+        if (status) { fields.push('status = $' + (fields.length + 1)); values.push(status); }
+        if (doctor_id && appointment_date && appointment_time) {
+            const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
+            fields.push('doctor_id = $' + (fields.length + 1)); values.push(doctor_id);
+            fields.push('appointment_time = $' + (fields.length + 1)); values.push(appointmentTimestamp);
+        }
+        if (purpose) { fields.push('purpose = $' + (fields.length + 1)); values.push(purpose); }
+        if (room_id) { fields.push('room_id = $' + (fields.length + 1)); values.push(room_id); }
+        if (confirmation_notes) { fields.push('confirmation_notes = $' + (fields.length + 1)); values.push(confirmation_notes); }
+        if (fields.length === 0) return res.status(400).json({ message: 'No valid fields provided for update.' });
+        query += fields.join(', ');
+        query += ' WHERE appointment_id = $' + (fields.length + 1) + ' RETURNING *';
+        values.push(id);
+        const { rows } = await db.query(query, values);
+        res.json(rows[0]);
+    } catch (err) {
+        console.error("Error in PATCH /api/appointments/:id:", err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
 
 app.get('/api/special-schedules/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
