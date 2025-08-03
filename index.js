@@ -412,9 +412,8 @@ app.delete('/api/doctor-rules/:rule_id', authMiddleware, async(req, res) => {
     }
 });
 
-
 // ***************************************************************
-// ** REWRITTEN: Fetches detailed pending appointments **
+// ** REWRITTEN: Fetches detailed pending appointments with correct joins **
 // ***************************************************************
 app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
     const { clinic_id } = req.query;
@@ -422,24 +421,21 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
         const query = `
             SELECT 
                 a.appointment_id AS id,
-                a.doctor_id,
-                a.clinic_id,
-                a.customer_id,
+                a.doctor_id, a.clinic_id, a.customer_id, a.patient_id,
                 TO_CHAR(a.appointment_time, 'YYYY-MM-DD') AS appointment_date,
                 TO_CHAR(a.appointment_time, 'HH24:MI:SS') AS appointment_time,
-                a.status,
-                a.purpose,
-                a.room_id,
+                a.status, a.purpose, a.room_id,
                 COALESCE(a.patient_name_at_booking, p.first_name_th || ' ' || p.last_name_th, c.display_name, 'Unknown') as patient_name,
                 p.dn,
                 p.mobile_phone,
-                c.line_user_id as line_id,
+                p.line_id,
+                p.date_of_birth,
                 di.full_name AS doctor_name,
                 r.room_name
             FROM appointments a
             JOIN doctors_identities di ON a.doctor_id = di.doctor_id
+            LEFT JOIN patients p ON a.patient_id = p.patient_id
             LEFT JOIN customers c ON a.customer_id = c.customer_id
-            LEFT JOIN patients p ON c.line_user_id = p.line_id -- This join might need adjustment based on your schema
             LEFT JOIN rooms r ON a.room_id = r.room_id
             WHERE a.clinic_id = $1 AND LOWER(a.status) = 'pending_confirmation'
             ORDER BY a.appointment_time;
@@ -586,26 +582,32 @@ app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
 });
 
 // ***************************************************************
-// ** UPGRADED: Creates an appointment with optional room_id and purpose **
+// ** UPGRADED: Creates appointment with new patient_id link **
 // ***************************************************************
 app.post('/api/appointments', authMiddleware, async (req, res) => {
-    const { customer_id, doctor_id, clinic_id, appointment_date, appointment_time, status, patient_name_at_booking, patient_phone_at_booking, purpose, room_id } = req.body;
+    const { 
+        customer_id, patient_id, doctor_id, clinic_id, appointment_date, 
+        appointment_time, status, patient_name_at_booking, 
+        patient_phone_at_booking, purpose, room_id 
+    } = req.body;
+    
     if (!doctor_id || !clinic_id || !appointment_date || !appointment_time) {
         return res.status(400).json({ msg: 'Missing required appointment details.' });
     }
     try {
         const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
         const { rows } = await db.query(
-            `INSERT INTO appointments (customer_id, doctor_id, clinic_id, appointment_time, status, patient_name_at_booking, patient_phone_at_booking, purpose, room_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-            [customer_id, doctor_id, clinic_id, appointmentTimestamp, status || 'confirmed', patient_name_at_booking, patient_phone_at_booking, purpose || null, room_id || null]
+            `INSERT INTO appointments (customer_id, patient_id, doctor_id, clinic_id, appointment_time, status, patient_name_at_booking, patient_phone_at_booking, purpose, room_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+            [customer_id || null, patient_id || null, doctor_id, clinic_id, appointmentTimestamp, status || 'confirmed', patient_name_at_booking, patient_phone_at_booking, purpose || null, room_id || null]
         );
         res.status(201).json(rows[0]);
     } catch (err) {
         console.error("Error in POST /api/appointments:", err.message);
-        res.status(500).json({ message: err.message || 'Server Error' });
+        res.status(500).json({ message: 'Server Error' });
     }
 });
+
 
 app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
@@ -634,6 +636,7 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
+
 
 
 app.get('/api/special-schedules/:doctor_id', authMiddleware, async (req, res) => {
