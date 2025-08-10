@@ -689,7 +689,22 @@ app.delete('/api/special-schedules/:id', authMiddleware, async (req, res) => {
 
 
 // --- NEW Treatment Plan Endpoints ---
-
+app.get('/api/patients/:patientId', authMiddleware, async (req, res) => {
+    const { patientId } = req.params;
+    try {
+        const { rows } = await db.query(
+            'SELECT * FROM patients WHERE patient_id = $1',
+            [patientId]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Patient not found.' });
+        }
+        res.json(rows[0]);
+    } catch (err) {
+        console.error("Error in GET /api/patients/:patientId:", err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
 // GET a patient's entire treatment history (plans, items, exams, documents)
 app.get('/api/patients/:patientId/treatment-history', authMiddleware, async (req, res) => {
     const { patientId } = req.params;
