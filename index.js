@@ -791,7 +791,45 @@ app.put('/api/treatment-items/:itemId', authMiddleware, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+app.put('/api/patients/:patientId', authMiddleware, async (req, res) => {
+    const { patientId } = req.params;
+    const {
+        dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th,
+        title_en, first_name_en, last_name_en, nickname, gender, date_of_birth,
+        chronic_diseases, allergies, mobile_phone, home_phone, line_id, email,
+        address, sub_district, district, province, country, zip_code,
+        extreme_care_drugs, is_pregnant // Include the new alert fields
+    } = req.body;
 
+    try {
+        const { rows } = await db.query(
+            `UPDATE patients SET
+                dn = $1, dn_old = $2, id_verification_type = $3, id_number = $4, title_th = $5,
+                first_name_th = $6, last_name_th = $7, title_en = $8, first_name_en = $9,
+                last_name_en = $10, nickname = $11, gender = $12, date_of_birth = $13,
+                chronic_diseases = $14, allergies = $15, mobile_phone = $16, home_phone = $17,
+                line_id = $18, email = $19, address = $20, sub_district = $21, district = $22,
+                province = $23, country = $24, zip_code = $25, extreme_care_drugs = $26,
+                is_pregnant = $27, updated_at = NOW()
+            WHERE patient_id = $28 RETURNING *`,
+            [
+                dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th,
+                title_en, first_name_en, last_name_en, nickname, gender, date_of_birth,
+                chronic_diseases, allergies, mobile_phone, home_phone, line_id, email,
+                address, sub_district, district, province, country, zip_code,
+                extreme_care_drugs, is_pregnant,
+                patientId
+            ]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Patient not found.' });
+        }
+        res.json(rows[0]);
+    } catch (err) {
+        console.error("Error in PUT /api/patients/:patientId:", err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
 // POST to upload a document (this would involve file handling middleware like multer)
 app.post('/api/patients/:patientId/documents', authMiddleware, async (req, res) => {
     // This is a simplified example. You'd use a library like 'multer' to handle the file upload.
