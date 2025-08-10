@@ -18,22 +18,51 @@ app.use(express.json());
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     try {
-        const { rows } = await db.query('SELECT * FROM workers WHERE username = $1', [username]);
-        if (rows.length === 0) return res.status(400).json({ msg: 'Invalid credentials' });
-        const user = rows[0];
+        // --- THE FIX STARTS HERE ---
+
+        // Step 1: Check if the user is in the 'workers' table (for admin/nurse roles)
+        let userResult = await db.query('SELECT id, username, password_hash FROM workers WHERE username = $1', [username]);
+        let userRole = 'nurse'; // Default role for workers
+
+        // Step 2: If not found in 'workers', check the 'doctors_identities' table
+        if (userResult.rows.length === 0) {
+            userResult = await db.query('SELECT doctor_id AS id, email AS username, password_hash FROM doctors_identities WHERE email = $1', [username]);
+            userRole = 'doctor'; // Set role to doctor if found here
+        }
+
+        // Step 3: If still not found, the user does not exist
+        if (userResult.rows.length === 0) {
+            return res.status(400).json({ msg: 'Invalid credentials' });
+        }
+
+        const user = userResult.rows[0];
+        
+        // Step 4: Compare the password
         const isMatch = await bcrypt.compare(password, user.password_hash);
-        if (!isMatch) return res.status(400).json({ msg: 'Invalid credentials' });
-        const payload = { user: { id: user.id, username: user.username } };
+        if (!isMatch) {
+            return res.status(400).json({ msg: 'Invalid credentials' });
+        }
+
+        // Step 5: Create a token with the user's ID, username, and their role
+        const payload = { 
+            user: { 
+                id: user.id, 
+                username: user.username,
+                role: userRole 
+            } 
+        };
+
         jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '12h' }, (err, token) => {
             if (err) throw err;
-            res.json({ token, user: { id: user.id, username: user.username } });
+            // Return the token and the user object, now including the role
+            res.json({ token, user: payload.user });
         });
+
     } catch (err) {
         console.error(err.message);
-        res.status(500).json({ message: err.message || 'Server Error' });
+        res.status(500).json({ message: 'Server Error' });
     }
 });
-
 // --- Auth Middleware ---
 const authMiddleware = (req, res, next) => {
     const authHeader = req.header('Authorization');
