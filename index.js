@@ -214,6 +214,7 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
         const dayOfWeek = getDay(targetDate);
         const weekOfMonth = getWeekOfMonth(targetDate);
 
+        // --- THIS IS THE RESTORED LOGIC ---
         // Base weekly schedule for doctors in this clinic
         let query = `
             SELECT di.doctor_id AS id, di.full_name AS name, di.specialty, da.start_time, da.end_time
@@ -252,7 +253,9 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
              WHERE dca.clinic_id = $1
              ORDER BY di.full_name`, [clinic_id]
         );
+        // --- END OF RESTORED LOGIC ---
 
+        // This query now selects the actual end_time
         const { rows: appointments } = await db.query(
             `SELECT a.appointment_id AS id, a.doctor_id, a.customer_id,
                     TO_CHAR(a.appointment_time, 'HH24:MI') AS appointment_time,
@@ -262,7 +265,7 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
              WHERE a.clinic_id = $1 AND DATE(a.appointment_time) = $2 AND LOWER(a.status) = 'confirmed'`,
             [clinic_id, date]
         );
-
+        
         res.json({
             doctors: finalWorkingDoctors,
             all_doctors_in_clinic: allDoctors,
@@ -274,7 +277,6 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 
 app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res) => {
     try {
