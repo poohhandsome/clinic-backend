@@ -216,61 +216,40 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
         const dayOfWeek = getDay(targetDate);
         const weekOfMonth = getWeekOfMonth(targetDate);
 
-        // --- NEW, ROBUST QUERY to get working doctors ---
+        // This query for working doctors is correct
         const workingDoctorsQuery = `
             WITH working_doctors AS (
-                -- Regular weekly schedule
-                SELECT
-                    da.doctor_id,
-                    da.start_time,
-                    da.end_time
-                FROM doctor_availability da
-                WHERE da.clinic_id = $1 AND da.day_of_week = $2
-                
+                SELECT da.doctor_id, da.start_time, da.end_time FROM doctor_availability da WHERE da.clinic_id = $1 AND da.day_of_week = $2
                 UNION
-                
-                -- Recurring rules schedule
-                SELECT
-                    dr.doctor_id,
-                    dr.start_time,
-                    dr.end_time
-                FROM doctor_availability_rules dr
-                WHERE dr.clinic_id = $1 AND dr.day_of_week = $2 AND $3 = ANY(dr.weeks_of_month)
+                SELECT dr.doctor_id, dr.start_time, dr.end_time FROM doctor_availability_rules dr WHERE dr.clinic_id = $1 AND dr.day_of_week = $2 AND $3 = ANY(dr.weeks_of_month)
             )
-            SELECT
-                di.doctor_id AS id,
-                di.full_name AS name,
-                di.specialty,
-                wd.start_time,
-                wd.end_time
+            SELECT di.doctor_id AS id, di.full_name AS name, di.specialty, wd.start_time, wd.end_time
             FROM doctors_identities di
             JOIN working_doctors wd ON di.doctor_id = wd.doctor_id
-            WHERE 
-                di.status = 'active'
-                AND di.doctor_id NOT IN (
-                    SELECT ss.doctor_id FROM special_schedules ss
-                    WHERE ss.schedule_date = $4 AND ss.is_available = false
-                );
+            WHERE di.status = 'active' AND di.doctor_id NOT IN (
+                SELECT ss.doctor_id FROM special_schedules ss WHERE ss.schedule_date = $4 AND ss.is_available = false
+            );
         `;
         const { rows: finalWorkingDoctors } = await db.query(workingDoctorsQuery, [clinic_id, dayOfWeek, weekOfMonth, date]);
 
-        // --- Fetch all doctors for the filter controls (no change here) ---
         const { rows: allDoctors } = await db.query(
             `SELECT di.doctor_id AS id, di.full_name AS name 
              FROM doctors_identities di
              JOIN doctor_clinic_assignments dca ON di.doctor_id = dca.doctor_id
-             WHERE dca.clinic_id = $1
-             ORDER BY di.full_name`, [clinic_id]
+             WHERE dca.clinic_id = $1 ORDER BY di.full_name`, [clinic_id]
         );
 
-        // --- Fetch appointments for the day (no change here) ---
+        // **THE CRITICAL FIX IS HERE**
+        // The query now fetches all appointments EXCEPT those that are 'cancelled'.
         const { rows: appointments } = await db.query(
             `SELECT a.appointment_id AS id, a.doctor_id, a.customer_id,
                     TO_CHAR(a.appointment_time, 'HH24:MI') AS appointment_time,
                     TO_CHAR(a.end_time, 'HH24:MI') AS end_time,
-                    a.status, COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown') AS patient_name_at_booking
-             FROM appointments a LEFT JOIN customers c ON a.customer_id = c.customer_id
-             WHERE a.clinic_id = $1 AND DATE(a.appointment_time) = $2 AND LOWER(a.status) = 'confirmed'`,
+                    a.status, COALESCE(a.patient_name_at_booking, p.first_name_th || ' ' || p.last_name_th, c.display_name, 'Unknown') AS patient_name_at_booking
+             FROM appointments a 
+             LEFT JOIN customers c ON a.customer_id = c.customer_id
+             LEFT JOIN patients p ON a.patient_id = p.patient_id
+             WHERE a.clinic_id = $1 AND DATE(a.appointment_time) = $2 AND LOWER(a.status) != 'cancelled'`,
             [clinic_id, date]
         );
         
