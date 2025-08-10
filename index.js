@@ -453,7 +453,10 @@ app.get('/api/all-appointments', authMiddleware, async (req, res) => {
     try {
         const { rows } = await db.query(`
             SELECT 
-                a.appointment_id as id, a.doctor_id, a.clinic_id,
+                a.appointment_id as id, 
+                a.doctor_id, 
+                a.clinic_id,
+                a.patient_id, -- <<< THE FIX IS HERE
                 TO_CHAR(a.appointment_time, 'YYYY-MM-DD') AS appointment_date,
                 TO_CHAR(a.appointment_time, 'HH24:MI:SS') as booking_time,
                 a.status, a.purpose, a.room_id,
