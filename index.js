@@ -207,45 +207,54 @@ app.get('/api/patients', authMiddleware, async (req, res) => {
 
 app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
     const { clinic_id, date } = req.query;
-    if (!clinic_id || !date) return res.status(400).json({ msg: 'Clinic ID and date are required' });
+    if (!clinic_id || !date) {
+        return res.status(400).json({ msg: 'Clinic ID and date are required' });
+    }
 
     try {
         const targetDate = new Date(date);
         const dayOfWeek = getDay(targetDate);
         const weekOfMonth = getWeekOfMonth(targetDate);
 
-        // --- THIS IS THE RESTORED LOGIC ---
-        // Base weekly schedule for doctors in this clinic
-        let query = `
-            SELECT di.doctor_id AS id, di.full_name AS name, di.specialty, da.start_time, da.end_time
+        // --- NEW, ROBUST QUERY to get working doctors ---
+        const workingDoctorsQuery = `
+            WITH working_doctors AS (
+                -- Regular weekly schedule
+                SELECT
+                    da.doctor_id,
+                    da.start_time,
+                    da.end_time
+                FROM doctor_availability da
+                WHERE da.clinic_id = $1 AND da.day_of_week = $2
+                
+                UNION
+                
+                -- Recurring rules schedule
+                SELECT
+                    dr.doctor_id,
+                    dr.start_time,
+                    dr.end_time
+                FROM doctor_availability_rules dr
+                WHERE dr.clinic_id = $1 AND dr.day_of_week = $2 AND $3 = ANY(dr.weeks_of_month)
+            )
+            SELECT
+                di.doctor_id AS id,
+                di.full_name AS name,
+                di.specialty,
+                wd.start_time,
+                wd.end_time
             FROM doctors_identities di
-            JOIN doctor_availability da ON di.doctor_id = da.doctor_id
-            WHERE da.clinic_id = $1 AND da.day_of_week = $2 AND di.status = 'active'
+            JOIN working_doctors wd ON di.doctor_id = wd.doctor_id
+            WHERE 
+                di.status = 'active'
+                AND di.doctor_id NOT IN (
+                    SELECT ss.doctor_id FROM special_schedules ss
+                    WHERE ss.schedule_date = $4 AND ss.is_available = false
+                );
         `;
-        const { rows: weeklyDoctors } = await db.query(query, [clinic_id, dayOfWeek]);
+        const { rows: finalWorkingDoctors } = await db.query(workingDoctorsQuery, [clinic_id, dayOfWeek, weekOfMonth, date]);
 
-        // Recurring rules for doctors in this clinic
-        query = `
-            SELECT di.doctor_id AS id, di.full_name AS name, di.specialty, dr.start_time, dr.end_time
-            FROM doctors_identities di
-            JOIN doctor_availability_rules dr ON di.doctor_id = dr.doctor_id
-            WHERE dr.clinic_id = $1 AND dr.day_of_week = $2 AND $3 = ANY(dr.weeks_of_month) AND di.status = 'active'
-        `;
-        const { rows: ruleDoctors } = await db.query(query, [clinic_id, dayOfWeek, weekOfMonth]);
-
-        const workingDoctorsMap = new Map();
-        [...weeklyDoctors, ...ruleDoctors].forEach(doc => workingDoctorsMap.set(doc.id, doc));
-        const workingDoctors = Array.from(workingDoctorsMap.values());
-        
-        const { rows: specialSchedules } = await db.query(
-            `SELECT doctor_id, is_available FROM special_schedules WHERE schedule_date = $1`, [date]
-        );
-
-        const finalWorkingDoctors = workingDoctors.filter(doc => {
-            const special = specialSchedules.find(s => s.doctor_id === doc.id);
-            return !special || special.is_available;
-        });
-
+        // --- Fetch all doctors for the filter controls (no change here) ---
         const { rows: allDoctors } = await db.query(
             `SELECT di.doctor_id AS id, di.full_name AS name 
              FROM doctors_identities di
@@ -253,9 +262,8 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
              WHERE dca.clinic_id = $1
              ORDER BY di.full_name`, [clinic_id]
         );
-        // --- END OF RESTORED LOGIC ---
 
-        // This query now selects the actual end_time
+        // --- Fetch appointments for the day (no change here) ---
         const { rows: appointments } = await db.query(
             `SELECT a.appointment_id AS id, a.doctor_id, a.customer_id,
                     TO_CHAR(a.appointment_time, 'HH24:MI') AS appointment_time,
