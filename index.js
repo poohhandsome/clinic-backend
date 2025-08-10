@@ -687,6 +687,103 @@ app.delete('/api/special-schedules/:id', authMiddleware, async (req, res) => {
     }
 });
 
+
+// --- NEW Treatment Plan Endpoints ---
+
+// GET a patient's entire treatment history (plans, items, exams, documents)
+app.get('/api/patients/:patientId/treatment-history', authMiddleware, async (req, res) => {
+    const { patientId } = req.params;
+    try {
+        const plans = await db.query('SELECT * FROM treatment_plans WHERE patient_id = $1 ORDER BY plan_date DESC', [patientId]);
+        const items = await db.query('SELECT ti.* FROM treatment_items ti JOIN treatment_plans tp ON ti.plan_id = tp.plan_id WHERE tp.patient_id = $1', [patientId]);
+        const findings = await db.query('SELECT * FROM examination_findings WHERE patient_id = $1 ORDER BY finding_date DESC', [patientId]);
+        const documents = await db.query('SELECT * FROM patient_documents WHERE patient_id = $1 ORDER BY uploaded_at DESC', [patientId]);
+
+        res.json({
+            plans: plans.rows,
+            items: items.rows,
+            findings: findings.rows,
+            documents: documents.rows
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST a new examination finding
+app.post('/api/examination-findings', authMiddleware, async (req, res) => {
+    const { patient_id, doctor_id, chief_complaint, clinical_findings } = req.body;
+    try {
+        const newFinding = await db.query(
+            'INSERT INTO examination_findings (patient_id, doctor_id, chief_complaint, clinical_findings) VALUES ($1, $2, $3, $4) RETURNING *',
+            [patient_id, doctor_id, chief_complaint, clinical_findings]
+        );
+        res.status(201).json(newFinding.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST a new treatment plan and its items
+app.post('/api/treatment-plans', authMiddleware, async (req, res) => {
+    const { patient_id, doctor_id, status, notes, items } = req.body;
+    const client = await db.pool.connect();
+    try {
+        await client.query('BEGIN');
+        const planResult = await client.query(
+            'INSERT INTO treatment_plans (patient_id, doctor_id, status, notes) VALUES ($1, $2, $3, $4) RETURNING plan_id',
+            [patient_id, doctor_id, status, notes]
+        );
+        const planId = planResult.rows[0].plan_id;
+
+        for (const item of items) {
+            await client.query(
+                'INSERT INTO treatment_items (plan_id, description, priority, status) VALUES ($1, $2, $3, $4)',
+                [planId, item.description, item.priority, item.status]
+            );
+        }
+        await client.query('COMMIT');
+        res.status(201).json({ plan_id: planId });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+});
+
+// PUT to update a treatment item's status or progress
+app.put('/api/treatment-items/:itemId', authMiddleware, async (req, res) => {
+    const { itemId } = req.params;
+    const { status, progress } = req.body;
+    try {
+        const updatedItem = await db.query(
+            'UPDATE treatment_items SET status = $1, progress = $2 WHERE item_id = $3 RETURNING *',
+            [status, progress, itemId]
+        );
+        res.json(updatedItem.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST to upload a document (this would involve file handling middleware like multer)
+app.post('/api/patients/:patientId/documents', authMiddleware, async (req, res) => {
+    // This is a simplified example. You'd use a library like 'multer' to handle the file upload.
+    const { patientId } = req.params;
+    const { file_name, file_url, document_type } = req.body; // In reality, you'd get this info after uploading to cloud storage
+    try {
+        const newDoc = await db.query(
+            'INSERT INTO patient_documents (patient_id, file_name, file_url, document_type) VALUES ($1, $2, $3, $4) RETURNING *',
+            [patientId, file_name, file_url, document_type]
+        );
+        res.status(201).json(newDoc.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
 app.listen(port, () => {
     console.log(`✅ Server started on port ${port}`);
 });
