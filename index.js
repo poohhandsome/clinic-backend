@@ -256,7 +256,7 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
         const { rows: appointments } = await db.query(
             `SELECT a.appointment_id AS id, a.doctor_id, a.customer_id,
                     TO_CHAR(a.appointment_time, 'HH24:MI') AS appointment_time,
-                    TO_CHAR(a.appointment_time + INTERVAL '30 minutes', 'HH24:MI') AS end_time,
+                    TO_CHAR(a.end_time, 'HH24:MI') AS end_time,
                     a.status, COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown') AS patient_name_at_booking
              FROM appointments a LEFT JOIN customers c ON a.customer_id = c.customer_id
              WHERE a.clinic_id = $1 AND DATE(a.appointment_time) = $2 AND LOWER(a.status) = 'confirmed'`,
@@ -588,21 +588,24 @@ app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
 // ** UPGRADED: Creates appointment with new patient_id link **
 // ***************************************************************
 app.post('/api/appointments', authMiddleware, async (req, res) => {
-    const { 
-        customer_id, patient_id, doctor_id, clinic_id, appointment_date, 
-        appointment_time, status, patient_name_at_booking, 
-        patient_phone_at_booking, purpose, room_id 
+    const {
+        customer_id, patient_id, doctor_id, clinic_id, appointment_date,
+        appointment_time, status, patient_name_at_booking,
+        patient_phone_at_booking, purpose, room_id,
+        duration_minutes // <-- NEW FIELD
     } = req.body;
-    
+
     if (!doctor_id || !clinic_id || !appointment_date || !appointment_time) {
         return res.status(400).json({ msg: 'Missing required appointment details.' });
     }
     try {
         const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
+        const duration = duration_minutes || 30; // Default to 30 mins if not provided
+
         const { rows } = await db.query(
-            `INSERT INTO appointments (customer_id, patient_id, doctor_id, clinic_id, appointment_time, status, patient_name_at_booking, patient_phone_at_booking, purpose, room_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-            [customer_id || null, patient_id || null, doctor_id, clinic_id, appointmentTimestamp, status || 'confirmed', patient_name_at_booking, patient_phone_at_booking, purpose || null, room_id || null]
+            `INSERT INTO appointments (customer_id, patient_id, doctor_id, clinic_id, appointment_time, end_time, status, patient_name_at_booking, patient_phone_at_booking, purpose, room_id)
+             VALUES ($1, $2, $3, $4, $5, $5::timestamptz + ($6 * interval '1 minute'), $7, $8, $9, $10, $11) RETURNING *`,
+            [customer_id || null, patient_id || null, doctor_id, clinic_id, appointmentTimestamp, duration, status || 'confirmed', patient_name_at_booking, patient_phone_at_booking, purpose || null, room_id || null]
         );
         res.status(201).json(rows[0]);
     } catch (err) {
@@ -610,7 +613,6 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 
 app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
