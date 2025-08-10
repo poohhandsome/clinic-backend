@@ -15,27 +15,32 @@ app.use(cors());
 app.use(express.json());
 
 // --- Authentication Routes ---
+// in index.js (REPLACE THIS ENDPOINT)
+
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     try {
-        // --- THE FIX STARTS HERE ---
+        let user = null;
+        let userRole = '';
 
-        // Step 1: Check if the user is in the 'workers' table (for admin/nurse roles)
-        let userResult = await db.query('SELECT id, username, password_hash FROM workers WHERE username = $1', [username]);
-        let userRole = 'nurse'; // Default role for workers
-
-        // Step 2: If not found in 'workers', check the 'doctors_identities' table
-        if (userResult.rows.length === 0) {
-            userResult = await db.query('SELECT doctor_id AS id, email AS username, password_hash FROM doctors_identities WHERE email = $1', [username]);
-            userRole = 'doctor'; // Set role to doctor if found here
+        // Step 1: Check the 'workers' table
+        const workerResult = await db.query('SELECT id, username, password_hash FROM workers WHERE username = $1', [username]);
+        if (workerResult.rows.length > 0) {
+            user = workerResult.rows[0];
+            userRole = 'nurse';
+        } else {
+            // Step 2: If not in 'workers', check the 'doctors_identities' table
+            const doctorResult = await db.query('SELECT doctor_id AS id, email AS username, password_hash FROM doctors_identities WHERE email = $1', [username]);
+            if (doctorResult.rows.length > 0) {
+                user = doctorResult.rows[0];
+                userRole = 'doctor';
+            }
         }
 
-        // Step 3: If still not found, the user does not exist
-        if (userResult.rows.length === 0) {
+        // Step 3: If user is still null, they don't exist
+        if (!user) {
             return res.status(400).json({ msg: 'Invalid credentials' });
         }
-
-        const user = userResult.rows[0];
         
         // Step 4: Compare the password
         const isMatch = await bcrypt.compare(password, user.password_hash);
@@ -43,7 +48,7 @@ app.post('/api/login', async (req, res) => {
             return res.status(400).json({ msg: 'Invalid credentials' });
         }
 
-        // Step 5: Create a token with the user's ID, username, and their role
+        // Step 5: Create a token with the user's ID, username, and role
         const payload = { 
             user: { 
                 id: user.id, 
@@ -54,7 +59,6 @@ app.post('/api/login', async (req, res) => {
 
         jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '12h' }, (err, token) => {
             if (err) throw err;
-            // Return the token and the user object, now including the role
             res.json({ token, user: payload.user });
         });
 
