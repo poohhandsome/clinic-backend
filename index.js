@@ -476,12 +476,12 @@ app.get('/api/all-appointments', authMiddleware, async (req, res) => {
 // ***************************************************************
 // ** NEW ENDPOINT: Update any detail of an appointment **
 // ***************************************************************
+
 app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { status, doctor_id, appointment_date, appointment_time, purpose, room_id, confirmation_notes } = req.body;
     
     try {
-        // Build the query dynamically to only update fields that are provided
         const fields = [];
         const values = [];
         let query = 'UPDATE appointments SET ';
@@ -489,6 +489,11 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
         if (status) {
             fields.push('status = $' + (fields.length + 1));
             values.push(status);
+            // **THE CRITICAL LOGIC IS HERE**: If the status is 'Checked-in',
+            // the database will automatically record the current time.
+            if (status.toLowerCase() === 'checked-in') {
+                fields.push('check_in_time = NOW()');
+            }
         }
         if (doctor_id && appointment_date && appointment_time) {
             const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
@@ -515,7 +520,7 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
         }
 
         query += fields.join(', ');
-        query += ' WHERE appointment_id = $' + (fields.length + 1) + ' RETURNING *';
+        query += ' WHERE appointment_id = $' + (values.length + 1) + ' RETURNING *';
         values.push(id);
 
         const { rows } = await db.query(query, values);
