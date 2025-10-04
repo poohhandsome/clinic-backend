@@ -1433,14 +1433,15 @@ app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
         const queryParams = [clinic_id, doctor_id, ...statusFilter];
 
         const query = `SELECT v.visit_id, v.patient_id, v.check_in_time,
-                LOWER(v.status) as status, COALESCE(v.waiting_alert_level, 0) as alert_level,
+                LOWER(v.status) as status,
+                COALESCE(NULLIF(v.waiting_alert_level, '')::INTEGER, 0) as alert_level,
                 p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
                 p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant
          FROM visits v
          JOIN patients p ON v.patient_id = p.patient_id
          WHERE v.clinic_id = $1 AND v.doctor_id = $2
            AND (${statusConditions})
-         ORDER BY v.waiting_alert_level DESC NULLS LAST, v.check_in_time ASC`;
+         ORDER BY COALESCE(NULLIF(v.waiting_alert_level, '')::INTEGER, 0) DESC, v.check_in_time ASC`;
 
         console.log('Query:', query);
         console.log('Query params:', queryParams);
