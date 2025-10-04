@@ -1921,22 +1921,18 @@ app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res
     const { visit_id } = req.params;
 
     try {
-        console.log(`[LOG] Fetching treatments for visit_id: ${visit_id}`); // <-- ADDED LOG
+        // THE FIX: Changed ORDER BY from "vt.created_at" to "vt.visit_treatment_id"
         const { rows } = await db.query(
             `SELECT vt.*,
                     t.code, t.name, t.category, t.standard_price
              FROM visit_treatments vt
              JOIN treatments t ON vt.treatment_id = t.treatment_id
              WHERE vt.visit_id = $1
-             ORDER BY vt.created_at`,
+             ORDER BY vt.visit_treatment_id`, // <-- FIX IS HERE
             [visit_id]
         );
-
-        console.log(`[LOG] Found ${rows.length} treatments for visit_id: ${visit_id}`); // <-- ADDED LOG
         res.json(rows);
     } catch (err) {
-        // THIS WILL PRINT THE PRECISE DATABASE ERROR TO YOUR BACKEND CONSOLE
-        console.error(`[ERROR] in /api/visit-treatments/visit/:visit_id:`, err); // <-- ADDED LOG
         handleError(res, err, 'Failed to fetch visit treatments');
     }
 });
@@ -2327,68 +2323,62 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
     const { patient_id } = req.params;
 
     try {
-        console.log(`[LOG] Fetching history for patient_id: ${patient_id}`); // <-- ADDED LOG
+        // THE FIX: Removed the problematic LEFT JOIN to treatment_plans
         const { rows } = await db.query(
             `SELECT
-                v.visit_id, 
-                DATE(v.check_in_time) as visit_date, 
-                v.check_in_time, 
-                v.checkout_time, 
-                v.status,
-                ef.chief_complaint,
-                di.full_name as doctor_name, 
-                di.specialty,
-                ef.finding_id, 
-                ef.diagnosis, 
-                ef.vital_signs, 
-                ef.physical_exam,
-                tp.plan_id, 
-                tp.medications, 
-                tp.instructions, 
-                tp.follow_up_date,
-                b.billing_id, 
-                b.total_amount, 
-                b.payment_method, 
-                b.status as payment_status
+                v.visit_id, DATE(v.check_in_time) as visit_date, v.check_in_time, v.checkout_time, v.status,
+                di.full_name as doctor_name, di.specialty,
+                ef.finding_id, ef.diagnosis, ef.vital_signs, ef.physical_exam, ef.chief_complaint,
+                b.billing_id, b.total_amount, b.payment_method, b.status as payment_status
              FROM visits v
              LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
              LEFT JOIN examination_findings ef ON v.visit_id = ef.visit_id
-             LEFT JOIN treatment_plans tp ON ef.finding_id = tp.examination_id
              LEFT JOIN billing b ON v.visit_id = b.visit_id
              WHERE v.patient_id = $1
              ORDER BY v.check_in_time DESC`,
             [patient_id]
         );
-        console.log(`[LOG] Found ${rows.length} visit history entries for patient_id: ${patient_id}`); // <-- ADDED LOG
 
         const visitIds = rows.map(r => r.visit_id);
         let treatments = [];
+        let plans = [];
 
         if (visitIds.length > 0) {
+            // Fetch treatments separately (this query is correct)
             const treatmentsResult = await db.query(
-                `SELECT vt.visit_id, vt.quantity, vt.price, vt.total_price,
-                        t.code, t.name, t.category
-                 FROM visit_treatments vt
-                 JOIN treatments t ON vt.treatment_id = t.treatment_id
+                `SELECT vt.visit_id, vt.quantity, vt.price, vt.total_price, t.code, t.name, t.category
+                 FROM visit_treatments vt JOIN treatments t ON vt.treatment_id = t.treatment_id
                  WHERE vt.visit_id = ANY($1::int[])
-                 ORDER BY vt.created_at`,
+                 ORDER BY vt.visit_treatment_id`,
                 [visitIds]
             );
             treatments = treatmentsResult.rows;
+            
+            // THE FIX: Fetch treatment plans separately using finding_id if available
+            const findingIds = rows.map(r => r.finding_id).filter(id => id); // Get all valid finding_id
+            if (findingIds.length > 0) {
+                const plansResult = await db.query(
+                    `SELECT * FROM treatment_plans WHERE examination_id = ANY($1::int[])`,
+                    [findingIds]
+                );
+                plans = plansResult.rows;
+            }
         }
 
+        // Combine the data
         const history = rows.map(visit => ({
             ...visit,
-            treatments: treatments.filter(t => t.visit_id === visit.visit_id)
+            treatments: treatments.filter(t => t.visit_id === visit.visit_id),
+            // Find the plan that matches this visit's examination finding
+            plan: plans.find(p => p.examination_id === visit.finding_id) || null
         }));
 
         res.json(history);
     } catch (err) {
-        // THIS WILL PRINT THE PRECISE DATABASE ERROR TO YOUR BACKEND CONSOLE
-        console.error(`[ERROR] in /api/history/patient/:patient_id:`, err); // <-- ADDED LOG
         handleError(res, err, 'Failed to fetch patient history');
     }
 });
+
 
 // GET visit details for PDF generation (authenticated)
 app.get('/api/history/visit/:visit_id/pdf', authMiddleware, async (req, res) => {
