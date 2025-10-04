@@ -1396,43 +1396,49 @@ app.get('/api/visits/queue', authMiddleware, async (req, res) => {
     }
 });
 
-// GET queue for specific doctor (authenticated)
+// GET queue for specific doctor (authenticated) - Supports status filtering
 // Uses appointments table since the existing system doesn't populate visits table
 app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
-    const { clinic_id } = req.query;
+    const { clinic_id, status } = req.query;
 
-    // --- CONSOLE LOGS FOR DEBUGGING (as requested) ---
     console.log('=== DOCTOR QUEUE ENDPOINT CALLED ===');
     console.log('Doctor ID:', doctor_id);
     console.log('Clinic ID:', clinic_id);
-    // --- END CONSOLE LOGS ---
+    console.log('Status filter:', status);
 
     if (!clinic_id) {
         return res.status(400).json({ message: 'Clinic ID is required' });
     }
 
     try {
-        // --- THE FIX ---
-        // This query now correctly targets the 'visits' table to find patients
-        // who are 'waiting' or 'in_progress' and have been assigned to this doctor.
-        const { rows } = await db.query(
-            `SELECT v.visit_id, v.patient_id, v.check_in_time,
-                    v.status, v.waiting_alert_level as alert_level,
-                    p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
-                    p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant
-             FROM visits v
-             JOIN patients p ON v.patient_id = p.patient_id
-             WHERE v.clinic_id = $1 AND v.doctor_id = $2
-               AND v.status IN ('waiting', 'in_progress')
-             ORDER BY v.waiting_alert_level DESC NULLS LAST, v.check_in_time ASC`,
-            [clinic_id, doctor_id]
-        );
+        // Parse status filter (comma-separated statuses)
+        const statusFilter = status ? status.split(',').map(s => s.trim().toLowerCase()) : ['checked-in'];
 
-        // --- CONSOLE LOGS FOR DEBUGGING ---
-        console.log('Query Result (from visits table):', rows);
+        console.log('Parsed status filter:', statusFilter);
+
+        // Build the status condition for SQL
+        const statusConditions = statusFilter.map((_, index) => `LOWER(a.status) = $${index + 3}`).join(' OR ');
+
+        // Fetch appointments matching the status filter
+        const queryParams = [clinic_id, doctor_id, ...statusFilter];
+
+        const query = `SELECT a.appointment_id as visit_id, a.patient_id, a.check_in_time,
+                LOWER(a.status) as status, 0 as alert_level,
+                p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
+                p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant
+         FROM appointments a
+         JOIN patients p ON a.patient_id = p.patient_id
+         WHERE a.clinic_id = $1 AND a.doctor_id = $2
+           AND (${statusConditions})
+           AND DATE(a.appointment_time) = CURRENT_DATE
+         ORDER BY a.check_in_time ASC`;
+
+        console.log('Query params:', queryParams);
+
+        const { rows } = await db.query(query, queryParams);
+
         console.log('Queue Length:', rows.length);
-        // --- END CONSOLE LOGS ---
 
         res.json(rows);
     } catch (err) {
@@ -1517,6 +1523,55 @@ app.put('/api/visits/:id/complete', authMiddleware, checkRole('doctor', 'admin')
         res.json(rows[0]);
     } catch (err) {
         handleError(res, err, 'Failed to complete visit');
+    }
+});
+
+// PUT checkout visit with password verification (doctor only)
+app.put('/api/visits/:id/checkout', authMiddleware, checkRole('doctor'), async (req, res) => {
+    const { id } = req.params;
+    const { password, status } = req.body;
+
+    if (!password) {
+        return res.status(400).json({ message: 'Password is required' });
+    }
+
+    if (!status || !['draft_checkout', 'completed'].includes(status)) {
+        return res.status(400).json({ message: 'Invalid status. Must be draft_checkout or completed' });
+    }
+
+    try {
+        // Verify doctor's password
+        const doctorCheck = await db.query(
+            'SELECT password_hash FROM doctors_identities WHERE doctor_id = $1',
+            [req.user.id]
+        );
+
+        if (doctorCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Doctor not found' });
+        }
+
+        const passwordMatch = await bcrypt.compare(password, doctorCheck.rows[0].password_hash);
+
+        if (!passwordMatch) {
+            return res.status(401).json({ message: 'Incorrect password' });
+        }
+
+        // Update appointment status (using appointments table)
+        const { rows } = await db.query(
+            `UPDATE appointments
+             SET status = $1
+             WHERE appointment_id = $2
+             RETURNING *`,
+            [status, id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Visit not found' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to checkout visit');
     }
 });
 
