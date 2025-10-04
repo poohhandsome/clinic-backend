@@ -1117,6 +1117,1311 @@ app.get('/health', async (req, res) => {
     }
 });
 
+// =====================================================================
+// GROUP 1: TREATMENTS API
+// =====================================================================
+
+// GET all treatments
+app.get('/api/treatments', authMiddleware, async (req, res) => {
+    try {
+        const { rows } = await db.query(
+            `SELECT treatment_id, code, name, standard_price, category, description, created_at
+             FROM treatments
+             ORDER BY category, code`
+        );
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch treatments');
+    }
+});
+
+// GET treatments by search query
+app.get('/api/treatments/search', authMiddleware, async (req, res) => {
+    const { q } = req.query;
+
+    if (!q || q.trim().length === 0) {
+        return res.status(400).json({ message: 'Search query is required' });
+    }
+
+    try {
+        const searchPattern = `%${q.trim()}%`;
+        const { rows } = await db.query(
+            `SELECT treatment_id, code, name, standard_price, category, description
+             FROM treatments
+             WHERE code ILIKE $1 OR name ILIKE $1
+             ORDER BY code
+             LIMIT 50`,
+            [searchPattern]
+        );
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to search treatments');
+    }
+});
+
+// POST create new treatment (nurse/admin only)
+app.post('/api/treatments', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
+    const { code, name, standard_price, category, description } = req.body;
+
+    // Validation
+    if (!code || !name || standard_price === undefined) {
+        return res.status(400).json({ message: 'Code, name, and standard_price are required' });
+    }
+
+    if (typeof code !== 'string' || code.trim().length === 0 || code.length > 50) {
+        return res.status(400).json({ message: 'Code must be a non-empty string (max 50 characters)' });
+    }
+
+    if (typeof name !== 'string' || name.trim().length === 0 || name.length > 255) {
+        return res.status(400).json({ message: 'Name must be a non-empty string (max 255 characters)' });
+    }
+
+    const price = parseFloat(standard_price);
+    if (isNaN(price) || price < 0) {
+        return res.status(400).json({ message: 'Standard price must be a positive number' });
+    }
+
+    try {
+        const { rows } = await db.query(
+            `INSERT INTO treatments (code, name, standard_price, category, description)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING *`,
+            [code.trim().toUpperCase(), name.trim(), price, category || null, description || null]
+        );
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        if (err.code === '23505') {
+            return res.status(409).json({ message: 'A treatment with this code already exists' });
+        }
+        handleError(res, err, 'Failed to create treatment');
+    }
+});
+
+// PUT update treatment (nurse/admin only)
+app.put('/api/treatments/:id', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
+    const { id } = req.params;
+    const { code, name, standard_price, category, description } = req.body;
+
+    // Validation
+    if (!code || !name || standard_price === undefined) {
+        return res.status(400).json({ message: 'Code, name, and standard_price are required' });
+    }
+
+    const price = parseFloat(standard_price);
+    if (isNaN(price) || price < 0) {
+        return res.status(400).json({ message: 'Standard price must be a positive number' });
+    }
+
+    try {
+        const { rows } = await db.query(
+            `UPDATE treatments
+             SET code = $1, name = $2, standard_price = $3, category = $4, description = $5
+             WHERE treatment_id = $6
+             RETURNING *`,
+            [code.trim().toUpperCase(), name.trim(), price, category || null, description || null, id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Treatment not found' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        if (err.code === '23505') {
+            return res.status(409).json({ message: 'A treatment with this code already exists' });
+        }
+        handleError(res, err, 'Failed to update treatment');
+    }
+});
+
+// DELETE treatment (admin only)
+app.delete('/api/treatments/:id', authMiddleware, checkRole('admin'), async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            'DELETE FROM treatments WHERE treatment_id = $1 RETURNING treatment_id',
+            [id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Treatment not found' });
+        }
+
+        res.json({ message: 'Treatment deleted successfully' });
+    } catch (err) {
+        if (err.code === '23503') {
+            return res.status(400).json({
+                message: 'Cannot delete treatment. It is currently referenced in visit treatments.'
+            });
+        }
+        handleError(res, err, 'Failed to delete treatment');
+    }
+});
+
+// =====================================================================
+// GROUP 2: VISITS API
+// =====================================================================
+
+// POST check-in patient (nurse/admin only)
+app.post('/api/visits/check-in', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
+    const { patient_id, clinic_id, chief_complaint } = req.body;
+
+    // Validation
+    if (!patient_id || !clinic_id) {
+        return res.status(400).json({ message: 'Patient ID and clinic ID are required' });
+    }
+
+    try {
+        // Verify patient exists
+        const patientCheck = await db.query(
+            'SELECT patient_id FROM patients WHERE patient_id = $1',
+            [patient_id]
+        );
+
+        if (patientCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Patient not found' });
+        }
+
+        // Create visit with status 'waiting'
+        const { rows } = await db.query(
+            `INSERT INTO visits (patient_id, clinic_id, visit_date, check_in_time, status, chief_complaint)
+             VALUES ($1, $2, CURRENT_DATE, NOW(), 'waiting', $3)
+             RETURNING *`,
+            [patient_id, clinic_id, chief_complaint || null]
+        );
+
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to check in patient');
+    }
+});
+
+// GET waiting queue (authenticated)
+app.get('/api/visits/queue', authMiddleware, async (req, res) => {
+    const { clinic_id } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        const { rows } = await db.query(
+            `SELECT v.visit_id, v.patient_id, v.visit_date, v.check_in_time, v.status,
+                    v.chief_complaint, v.doctor_id, v.alert_level,
+                    p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
+                    p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant,
+                    di.full_name as doctor_name
+             FROM visits v
+             JOIN patients p ON v.patient_id = p.patient_id
+             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             WHERE v.clinic_id = $1 AND v.status = 'waiting'
+             ORDER BY v.alert_level DESC NULLS LAST, v.check_in_time ASC`,
+            [clinic_id]
+        );
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch queue');
+    }
+});
+
+// GET queue for specific doctor (authenticated)
+app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
+    const { doctor_id } = req.params;
+    const { clinic_id } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        const { rows } = await db.query(
+            `SELECT v.visit_id, v.patient_id, v.visit_date, v.check_in_time, v.status,
+                    v.chief_complaint, v.alert_level,
+                    p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
+                    p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant
+             FROM visits v
+             JOIN patients p ON v.patient_id = p.patient_id
+             WHERE v.clinic_id = $1 AND v.doctor_id = $2 AND v.status IN ('waiting', 'in_progress')
+             ORDER BY v.alert_level DESC NULLS LAST, v.check_in_time ASC`,
+            [clinic_id, doctor_id]
+        );
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch doctor queue');
+    }
+});
+
+// PUT assign doctor to visit (nurse/admin only)
+app.put('/api/visits/:id/assign-doctor', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
+    const { id } = req.params;
+    const { doctor_id } = req.body;
+
+    if (!doctor_id) {
+        return res.status(400).json({ message: 'Doctor ID is required' });
+    }
+
+    try {
+        const { rows } = await db.query(
+            `UPDATE visits
+             SET doctor_id = $1, status = 'in_progress'
+             WHERE visit_id = $2
+             RETURNING *`,
+            [doctor_id, id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Visit not found' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to assign doctor');
+    }
+});
+
+// GET visit details (authenticated)
+app.get('/api/visits/:id', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            `SELECT v.*,
+                    p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
+                    p.gender, p.mobile_phone, p.chronic_diseases, p.allergies,
+                    p.extreme_care_drugs, p.is_pregnant,
+                    di.full_name as doctor_name, di.specialty
+             FROM visits v
+             JOIN patients p ON v.patient_id = p.patient_id
+             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             WHERE v.visit_id = $1`,
+            [id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Visit not found' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch visit details');
+    }
+});
+
+// PUT complete visit (doctor/admin only)
+app.put('/api/visits/:id/complete', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            `UPDATE visits
+             SET status = 'completed', checkout_time = NOW()
+             WHERE visit_id = $1
+             RETURNING *`,
+            [id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Visit not found' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to complete visit');
+    }
+});
+
+// =====================================================================
+// GROUP 3: EXAMINATION FINDINGS API
+// =====================================================================
+
+// POST create examination (doctor/admin only)
+app.post('/api/examinations', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
+    const { visit_id, chief_complaint, vital_signs, physical_exam, diagnosis } = req.body;
+
+    // Validation
+    if (!visit_id) {
+        return res.status(400).json({ message: 'Visit ID is required' });
+    }
+
+    // Validate vital_signs is valid JSON if provided
+    if (vital_signs && typeof vital_signs !== 'object') {
+        return res.status(400).json({ message: 'Vital signs must be a valid JSON object' });
+    }
+
+    try {
+        // Verify visit exists and is in_progress
+        const visitCheck = await db.query(
+            'SELECT visit_id, status FROM visits WHERE visit_id = $1',
+            [visit_id]
+        );
+
+        if (visitCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Visit not found' });
+        }
+
+        if (visitCheck.rows[0].status !== 'in_progress') {
+            return res.status(400).json({
+                message: 'Can only create examination for visits in progress',
+                currentStatus: visitCheck.rows[0].status
+            });
+        }
+
+        const { rows } = await db.query(
+            `INSERT INTO examination_findings
+             (visit_id, doctor_id, chief_complaint, vital_signs, physical_exam, diagnosis)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING *`,
+            [
+                visit_id,
+                req.user.id,
+                chief_complaint || null,
+                vital_signs ? JSON.stringify(vital_signs) : null,
+                physical_exam || null,
+                diagnosis || null
+            ]
+        );
+
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to create examination');
+    }
+});
+
+// GET examination by visit (authenticated)
+app.get('/api/examinations/visit/:visit_id', authMiddleware, async (req, res) => {
+    const { visit_id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            `SELECT ef.*,
+                    v.patient_id, v.visit_date, v.check_in_time,
+                    p.dn, p.first_name_th, p.last_name_th,
+                    di.full_name as doctor_name, di.specialty
+             FROM examination_findings ef
+             JOIN visits v ON ef.visit_id = v.visit_id
+             JOIN patients p ON v.patient_id = p.patient_id
+             JOIN doctors_identities di ON ef.doctor_id = di.doctor_id
+             WHERE ef.visit_id = $1`,
+            [visit_id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Examination not found for this visit' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch examination');
+    }
+});
+
+// PUT update examination (doctor/admin only)
+app.put('/api/examinations/:id', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
+    const { id } = req.params;
+    const { chief_complaint, vital_signs, physical_exam, diagnosis } = req.body;
+
+    // Validate vital_signs is valid JSON if provided
+    if (vital_signs && typeof vital_signs !== 'object') {
+        return res.status(400).json({ message: 'Vital signs must be a valid JSON object' });
+    }
+
+    try {
+        // Check ownership (only creating doctor can update, unless admin)
+        const ownerCheck = await db.query(
+            'SELECT doctor_id FROM examination_findings WHERE finding_id = $1',
+            [id]
+        );
+
+        if (ownerCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Examination not found' });
+        }
+
+        if (req.user.role !== 'admin' && ownerCheck.rows[0].doctor_id !== req.user.id) {
+            return res.status(403).json({ message: 'You can only update your own examinations' });
+        }
+
+        const { rows } = await db.query(
+            `UPDATE examination_findings
+             SET chief_complaint = $1, vital_signs = $2, physical_exam = $3, diagnosis = $4
+             WHERE finding_id = $5
+             RETURNING *`,
+            [
+                chief_complaint || null,
+                vital_signs ? JSON.stringify(vital_signs) : null,
+                physical_exam || null,
+                diagnosis || null,
+                id
+            ]
+        );
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to update examination');
+    }
+});
+
+// GET single examination (authenticated)
+app.get('/api/examinations/:id', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            `SELECT ef.*,
+                    v.patient_id, v.visit_date,
+                    p.dn, p.first_name_th, p.last_name_th,
+                    di.full_name as doctor_name
+             FROM examination_findings ef
+             JOIN visits v ON ef.visit_id = v.visit_id
+             JOIN patients p ON v.patient_id = p.patient_id
+             JOIN doctors_identities di ON ef.doctor_id = di.doctor_id
+             WHERE ef.finding_id = $1`,
+            [id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Examination not found' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch examination');
+    }
+});
+
+// =====================================================================
+// GROUP 4: TREATMENT PLANS API
+// =====================================================================
+
+// POST create treatment plan (doctor/admin only)
+app.post('/api/treatment-plans', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
+    const { examination_id, medications, instructions, follow_up_date } = req.body;
+
+    // Validation
+    if (!examination_id) {
+        return res.status(400).json({ message: 'Examination ID is required' });
+    }
+
+    // Validate medications is valid array if provided
+    if (medications) {
+        if (!Array.isArray(medications)) {
+            return res.status(400).json({ message: 'Medications must be an array' });
+        }
+        // Validate each medication has required fields
+        for (const med of medications) {
+            if (!med.name || !med.dosage) {
+                return res.status(400).json({
+                    message: 'Each medication must have name and dosage'
+                });
+            }
+        }
+    }
+
+    try {
+        // Verify examination exists
+        const examCheck = await db.query(
+            'SELECT finding_id FROM examination_findings WHERE finding_id = $1',
+            [examination_id]
+        );
+
+        if (examCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Examination not found' });
+        }
+
+        const { rows } = await db.query(
+            `INSERT INTO treatment_plans
+             (examination_id, doctor_id, medications, instructions, follow_up_date)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING *`,
+            [
+                examination_id,
+                req.user.id,
+                medications ? JSON.stringify(medications) : null,
+                instructions || null,
+                follow_up_date || null
+            ]
+        );
+
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to create treatment plan');
+    }
+});
+
+// GET treatment plan by examination (authenticated)
+app.get('/api/treatment-plans/examination/:exam_id', authMiddleware, async (req, res) => {
+    const { exam_id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            `SELECT tp.*,
+                    di.full_name as doctor_name,
+                    ef.diagnosis
+             FROM treatment_plans tp
+             JOIN doctors_identities di ON tp.doctor_id = di.doctor_id
+             JOIN examination_findings ef ON tp.examination_id = ef.finding_id
+             WHERE tp.examination_id = $1`,
+            [exam_id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Treatment plan not found for this examination' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch treatment plan');
+    }
+});
+
+// GET treatment plan by visit (authenticated)
+app.get('/api/treatment-plans/visit/:visit_id', authMiddleware, async (req, res) => {
+    const { visit_id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            `SELECT tp.*,
+                    di.full_name as doctor_name,
+                    ef.diagnosis
+             FROM treatment_plans tp
+             JOIN examination_findings ef ON tp.examination_id = ef.finding_id
+             JOIN doctors_identities di ON tp.doctor_id = di.doctor_id
+             WHERE ef.visit_id = $1`,
+            [visit_id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Treatment plan not found for this visit' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch treatment plan');
+    }
+});
+
+// PUT update treatment plan (doctor/admin only)
+app.put('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
+    const { id } = req.params;
+    const { medications, instructions, follow_up_date } = req.body;
+
+    // Validate medications if provided
+    if (medications && !Array.isArray(medications)) {
+        return res.status(400).json({ message: 'Medications must be an array' });
+    }
+
+    try {
+        // Check ownership
+        const ownerCheck = await db.query(
+            'SELECT doctor_id FROM treatment_plans WHERE plan_id = $1',
+            [id]
+        );
+
+        if (ownerCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Treatment plan not found' });
+        }
+
+        if (req.user.role !== 'admin' && ownerCheck.rows[0].doctor_id !== req.user.id) {
+            return res.status(403).json({ message: 'You can only update your own treatment plans' });
+        }
+
+        const { rows } = await db.query(
+            `UPDATE treatment_plans
+             SET medications = $1, instructions = $2, follow_up_date = $3
+             WHERE plan_id = $4
+             RETURNING *`,
+            [
+                medications ? JSON.stringify(medications) : null,
+                instructions || null,
+                follow_up_date || null,
+                id
+            ]
+        );
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to update treatment plan');
+    }
+});
+
+// DELETE treatment plan (doctor/admin only)
+app.delete('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        // Check ownership
+        const ownerCheck = await db.query(
+            'SELECT doctor_id FROM treatment_plans WHERE plan_id = $1',
+            [id]
+        );
+
+        if (ownerCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Treatment plan not found' });
+        }
+
+        if (req.user.role !== 'admin' && ownerCheck.rows[0].doctor_id !== req.user.id) {
+            return res.status(403).json({ message: 'You can only delete your own treatment plans' });
+        }
+
+        await db.query('DELETE FROM treatment_plans WHERE plan_id = $1', [id]);
+
+        res.json({ message: 'Treatment plan deleted successfully' });
+    } catch (err) {
+        handleError(res, err, 'Failed to delete treatment plan');
+    }
+});
+
+// =====================================================================
+// GROUP 5: VISIT TREATMENTS API
+// =====================================================================
+
+// POST add treatment to visit (doctor/nurse/admin)
+app.post('/api/visit-treatments', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
+    const { visit_id, treatment_id, quantity, custom_price } = req.body;
+
+    // Validation
+    if (!visit_id || !treatment_id || !quantity) {
+        return res.status(400).json({ message: 'Visit ID, treatment ID, and quantity are required' });
+    }
+
+    const qty = parseInt(quantity);
+    if (isNaN(qty) || qty <= 0) {
+        return res.status(400).json({ message: 'Quantity must be a positive number' });
+    }
+
+    try {
+        // Verify visit exists
+        const visitCheck = await db.query(
+            'SELECT visit_id FROM visits WHERE visit_id = $1',
+            [visit_id]
+        );
+
+        if (visitCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Visit not found' });
+        }
+
+        // Get treatment standard price
+        const treatmentCheck = await db.query(
+            'SELECT standard_price FROM treatments WHERE treatment_id = $1',
+            [treatment_id]
+        );
+
+        if (treatmentCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Treatment not found' });
+        }
+
+        const price = custom_price !== undefined ? parseFloat(custom_price) : treatmentCheck.rows[0].standard_price;
+        const total = price * qty;
+
+        const { rows } = await db.query(
+            `INSERT INTO visit_treatments
+             (visit_id, treatment_id, quantity, price, total_price)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING *`,
+            [visit_id, treatment_id, qty, price, total]
+        );
+
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to add treatment to visit');
+    }
+});
+
+// GET all treatments for a visit (authenticated)
+app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res) => {
+    const { visit_id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            `SELECT vt.*,
+                    t.code, t.name, t.category, t.standard_price
+             FROM visit_treatments vt
+             JOIN treatments t ON vt.treatment_id = t.treatment_id
+             WHERE vt.visit_id = $1
+             ORDER BY vt.created_at`,
+            [visit_id]
+        );
+
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch visit treatments');
+    }
+});
+
+// PUT update visit treatment (doctor/nurse/admin)
+app.put('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
+    const { id } = req.params;
+    const { quantity, custom_price } = req.body;
+
+    if (!quantity) {
+        return res.status(400).json({ message: 'Quantity is required' });
+    }
+
+    const qty = parseInt(quantity);
+    if (isNaN(qty) || qty <= 0) {
+        return res.status(400).json({ message: 'Quantity must be a positive number' });
+    }
+
+    try {
+        // Get current visit treatment and standard price
+        const current = await db.query(
+            `SELECT vt.price, t.standard_price
+             FROM visit_treatments vt
+             JOIN treatments t ON vt.treatment_id = t.treatment_id
+             WHERE vt.visit_treatment_id = $1`,
+            [id]
+        );
+
+        if (current.rows.length === 0) {
+            return res.status(404).json({ message: 'Visit treatment not found' });
+        }
+
+        const price = custom_price !== undefined ? parseFloat(custom_price) : current.rows[0].price;
+        const total = price * qty;
+
+        const { rows } = await db.query(
+            `UPDATE visit_treatments
+             SET quantity = $1, price = $2, total_price = $3
+             WHERE visit_treatment_id = $4
+             RETURNING *`,
+            [qty, price, total, id]
+        );
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to update visit treatment');
+    }
+});
+
+// DELETE visit treatment (doctor/nurse/admin)
+app.delete('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            'DELETE FROM visit_treatments WHERE visit_treatment_id = $1 RETURNING visit_treatment_id',
+            [id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Visit treatment not found' });
+        }
+
+        res.json({ message: 'Visit treatment removed successfully' });
+    } catch (err) {
+        handleError(res, err, 'Failed to remove visit treatment');
+    }
+});
+
+// GET single visit treatment (authenticated)
+app.get('/api/visit-treatments/:id', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            `SELECT vt.*,
+                    t.code, t.name, t.category, t.standard_price
+             FROM visit_treatments vt
+             JOIN treatments t ON vt.treatment_id = t.treatment_id
+             WHERE vt.visit_treatment_id = $1`,
+            [id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Visit treatment not found' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch visit treatment');
+    }
+});
+
+// =====================================================================
+// GROUP 6: BILLING API
+// =====================================================================
+
+// POST generate bill for a visit (nurse/admin only)
+app.post('/api/billing/generate/:visit_id', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
+    const { visit_id } = req.params;
+    const { discount, notes } = req.body;
+
+    try {
+        // Verify visit exists
+        const visitCheck = await db.query(
+            'SELECT visit_id, patient_id FROM visits WHERE visit_id = $1',
+            [visit_id]
+        );
+
+        if (visitCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Visit not found' });
+        }
+
+        // Check if bill already exists
+        const existingBill = await db.query(
+            'SELECT billing_id FROM billing WHERE visit_id = $1',
+            [visit_id]
+        );
+
+        if (existingBill.rows.length > 0) {
+            return res.status(400).json({
+                message: 'Bill already exists for this visit',
+                billing_id: existingBill.rows[0].billing_id
+            });
+        }
+
+        // Calculate total from visit_treatments
+        const totalCalc = await db.query(
+            'SELECT COALESCE(SUM(total_price), 0) as total FROM visit_treatments WHERE visit_id = $1',
+            [visit_id]
+        );
+
+        const subtotal = parseFloat(totalCalc.rows[0].total);
+        const discountAmount = discount ? parseFloat(discount) : 0;
+        const total = subtotal - discountAmount;
+
+        if (total < 0) {
+            return res.status(400).json({ message: 'Total amount cannot be negative' });
+        }
+
+        const { rows } = await db.query(
+            `INSERT INTO billing
+             (visit_id, patient_id, total_amount, discount, status, notes)
+             VALUES ($1, $2, $3, $4, 'pending', $5)
+             RETURNING *`,
+            [visit_id, visitCheck.rows[0].patient_id, total, discountAmount, notes || null]
+        );
+
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to generate bill');
+    }
+});
+
+// GET bill details (authenticated)
+app.get('/api/billing/:id', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            `SELECT b.*,
+                    v.visit_date, v.check_in_time, v.checkout_time,
+                    p.dn, p.first_name_th, p.last_name_th, p.mobile_phone,
+                    di.full_name as doctor_name
+             FROM billing b
+             JOIN visits v ON b.visit_id = v.visit_id
+             JOIN patients p ON b.patient_id = p.patient_id
+             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             WHERE b.billing_id = $1`,
+            [id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Bill not found' });
+        }
+
+        // Get itemized treatments
+        const items = await db.query(
+            `SELECT vt.*, t.code, t.name
+             FROM visit_treatments vt
+             JOIN treatments t ON vt.treatment_id = t.treatment_id
+             WHERE vt.visit_id = $1`,
+            [rows[0].visit_id]
+        );
+
+        res.json({
+            ...rows[0],
+            items: items.rows
+        });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch bill details');
+    }
+});
+
+// GET bill by visit (authenticated)
+app.get('/api/billing/visit/:visit_id', authMiddleware, async (req, res) => {
+    const { visit_id } = req.params;
+
+    try {
+        const { rows } = await db.query(
+            `SELECT b.*,
+                    p.dn, p.first_name_th, p.last_name_th
+             FROM billing b
+             JOIN patients p ON b.patient_id = p.patient_id
+             WHERE b.visit_id = $1`,
+            [visit_id]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Bill not found for this visit' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch bill');
+    }
+});
+
+// PUT record payment (nurse/admin only)
+app.put('/api/billing/:id/payment', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
+    const { id } = req.params;
+    const { payment_method, paid_amount } = req.body;
+
+    // Validation
+    if (!payment_method || paid_amount === undefined) {
+        return res.status(400).json({ message: 'Payment method and paid amount are required' });
+    }
+
+    const validMethods = ['cash', 'card', 'transfer', 'promptpay', 'other'];
+    if (!validMethods.includes(payment_method.toLowerCase())) {
+        return res.status(400).json({
+            message: 'Invalid payment method',
+            validMethods
+        });
+    }
+
+    const amount = parseFloat(paid_amount);
+    if (isNaN(amount) || amount < 0) {
+        return res.status(400).json({ message: 'Paid amount must be a positive number' });
+    }
+
+    try {
+        // Get bill details
+        const billCheck = await db.query(
+            'SELECT total_amount, status FROM billing WHERE billing_id = $1',
+            [id]
+        );
+
+        if (billCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Bill not found' });
+        }
+
+        if (billCheck.rows[0].status === 'paid') {
+            return res.status(400).json({ message: 'Bill is already paid' });
+        }
+
+        const totalAmount = parseFloat(billCheck.rows[0].total_amount);
+        if (Math.abs(amount - totalAmount) > 0.01) {
+            return res.status(400).json({
+                message: 'Paid amount does not match bill total',
+                expected: totalAmount,
+                received: amount
+            });
+        }
+
+        const { rows } = await db.query(
+            `UPDATE billing
+             SET payment_method = $1, paid_amount = $2, payment_date = NOW(), status = 'paid'
+             WHERE billing_id = $3
+             RETURNING *`,
+            [payment_method.toLowerCase(), amount, id]
+        );
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to record payment');
+    }
+});
+
+// GET all pending bills (nurse/admin only)
+app.get('/api/billing/pending', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
+    const { clinic_id } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        const { rows } = await db.query(
+            `SELECT b.billing_id, b.total_amount, b.created_at,
+                    v.visit_date, v.visit_id,
+                    p.dn, p.first_name_th, p.last_name_th
+             FROM billing b
+             JOIN visits v ON b.visit_id = v.visit_id
+             JOIN patients p ON b.patient_id = p.patient_id
+             WHERE v.clinic_id = $1 AND b.status = 'pending'
+             ORDER BY b.created_at DESC`,
+            [clinic_id]
+        );
+
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch pending bills');
+    }
+});
+
+// GET billing history (admin only)
+app.get('/api/billing/history', authMiddleware, checkRole('admin'), async (req, res) => {
+    const { clinic_id, start_date, end_date, page = 1, limit = 50 } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const offset = (pageNum - 1) * limitNum;
+
+    try {
+        let query = `
+            SELECT b.*,
+                   v.visit_date,
+                   p.dn, p.first_name_th, p.last_name_th
+            FROM billing b
+            JOIN visits v ON b.visit_id = v.visit_id
+            JOIN patients p ON b.patient_id = p.patient_id
+            WHERE v.clinic_id = $1
+        `;
+        const params = [clinic_id];
+
+        if (start_date) {
+            params.push(start_date);
+            query += ` AND b.created_at >= $${params.length}`;
+        }
+
+        if (end_date) {
+            params.push(end_date);
+            query += ` AND b.created_at <= $${params.length}`;
+        }
+
+        query += ` ORDER BY b.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        params.push(limitNum, offset);
+
+        const { rows } = await db.query(query, params);
+
+        // Get total count
+        let countQuery = `
+            SELECT COUNT(*)
+            FROM billing b
+            JOIN visits v ON b.visit_id = v.visit_id
+            WHERE v.clinic_id = $1
+        `;
+        const countParams = [clinic_id];
+
+        if (start_date) {
+            countParams.push(start_date);
+            countQuery += ` AND b.created_at >= $${countParams.length}`;
+        }
+
+        if (end_date) {
+            countParams.push(end_date);
+            countQuery += ` AND b.created_at <= $${countParams.length}`;
+        }
+
+        const { rows: countResult } = await db.query(countQuery, countParams);
+        const total = parseInt(countResult[0].count);
+
+        res.json({
+            data: rows,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total,
+                totalPages: Math.ceil(total / limitNum)
+            }
+        });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch billing history');
+    }
+});
+
+// =====================================================================
+// GROUP 7: HISTORY & REPORTING API
+// =====================================================================
+
+// GET complete patient history (authenticated)
+app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => {
+    const { patient_id } = req.params;
+
+    try {
+        // Get all visits with exams, treatments, and bills
+        const { rows } = await db.query(
+            `SELECT
+                v.visit_id, v.visit_date, v.check_in_time, v.checkout_time, v.status, v.chief_complaint,
+                di.full_name as doctor_name, di.specialty,
+                ef.finding_id, ef.diagnosis, ef.vital_signs, ef.physical_exam,
+                tp.plan_id, tp.medications, tp.instructions, tp.follow_up_date,
+                b.billing_id, b.total_amount, b.payment_method, b.status as payment_status
+             FROM visits v
+             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             LEFT JOIN examination_findings ef ON v.visit_id = ef.visit_id
+             LEFT JOIN treatment_plans tp ON ef.finding_id = tp.examination_id
+             LEFT JOIN billing b ON v.visit_id = b.visit_id
+             WHERE v.patient_id = $1
+             ORDER BY v.visit_date DESC, v.check_in_time DESC`,
+            [patient_id]
+        );
+
+        // Get all visit treatments for these visits
+        const visitIds = rows.map(r => r.visit_id);
+        let treatments = [];
+
+        if (visitIds.length > 0) {
+            const treatmentsResult = await db.query(
+                `SELECT vt.visit_id, vt.quantity, vt.price, vt.total_price,
+                        t.code, t.name, t.category
+                 FROM visit_treatments vt
+                 JOIN treatments t ON vt.treatment_id = t.treatment_id
+                 WHERE vt.visit_id = ANY($1::int[])
+                 ORDER BY vt.created_at`,
+                [visitIds]
+            );
+            treatments = treatmentsResult.rows;
+        }
+
+        // Group treatments by visit
+        const history = rows.map(visit => ({
+            ...visit,
+            treatments: treatments.filter(t => t.visit_id === visit.visit_id)
+        }));
+
+        res.json(history);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch patient history');
+    }
+});
+
+// GET visit details for PDF generation (authenticated)
+app.get('/api/history/visit/:visit_id/pdf', authMiddleware, async (req, res) => {
+    const { visit_id } = req.params;
+
+    try {
+        // Get complete visit information
+        const visitData = await db.query(
+            `SELECT
+                v.*,
+                p.dn, p.title_th, p.first_name_th, p.last_name_th, p.date_of_birth,
+                p.gender, p.mobile_phone, p.address, p.chronic_diseases, p.allergies,
+                di.full_name as doctor_name, di.specialty,
+                c.name as clinic_name
+             FROM visits v
+             JOIN patients p ON v.patient_id = p.patient_id
+             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             JOIN clinics c ON v.clinic_id = c.clinic_id
+             WHERE v.visit_id = $1`,
+            [visit_id]
+        );
+
+        if (visitData.rows.length === 0) {
+            return res.status(404).json({ message: 'Visit not found' });
+        }
+
+        // Get examination findings
+        const exam = await db.query(
+            `SELECT * FROM examination_findings WHERE visit_id = $1`,
+            [visit_id]
+        );
+
+        // Get treatment plan
+        const plan = await db.query(
+            `SELECT tp.* FROM treatment_plans tp
+             JOIN examination_findings ef ON tp.examination_id = ef.finding_id
+             WHERE ef.visit_id = $1`,
+            [visit_id]
+        );
+
+        // Get treatments
+        const treatments = await db.query(
+            `SELECT vt.quantity, vt.price, vt.total_price,
+                    t.code, t.name
+             FROM visit_treatments vt
+             JOIN treatments t ON vt.treatment_id = t.treatment_id
+             WHERE vt.visit_id = $1`,
+            [visit_id]
+        );
+
+        // Get billing
+        const billing = await db.query(
+            `SELECT * FROM billing WHERE visit_id = $1`,
+            [visit_id]
+        );
+
+        // Return structured data for PDF generation (frontend will handle PDF creation)
+        res.json({
+            visit: visitData.rows[0],
+            examination: exam.rows[0] || null,
+            treatmentPlan: plan.rows[0] || null,
+            treatments: treatments.rows,
+            billing: billing.rows[0] || null
+        });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch visit details for PDF');
+    }
+});
+
+// GET daily summary report (admin only)
+app.get('/api/reports/daily-summary', authMiddleware, checkRole('admin'), async (req, res) => {
+    const { clinic_id, date } = req.query;
+
+    if (!clinic_id || !date) {
+        return res.status(400).json({ message: 'Clinic ID and date are required' });
+    }
+
+    try {
+        // Total visits
+        const visitsResult = await db.query(
+            `SELECT COUNT(*) as total_visits,
+                    COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_visits,
+                    COUNT(CASE WHEN status = 'waiting' THEN 1 END) as waiting_visits,
+                    COUNT(CASE WHEN status = 'in_progress' THEN 1 END) as in_progress_visits
+             FROM visits
+             WHERE clinic_id = $1 AND visit_date = $2`,
+            [clinic_id, date]
+        );
+
+        // Total revenue
+        const revenueResult = await db.query(
+            `SELECT COALESCE(SUM(b.total_amount), 0) as total_revenue,
+                    COALESCE(SUM(CASE WHEN b.status = 'paid' THEN b.total_amount ELSE 0 END), 0) as paid_revenue,
+                    COALESCE(SUM(CASE WHEN b.status = 'pending' THEN b.total_amount ELSE 0 END), 0) as pending_revenue
+             FROM billing b
+             JOIN visits v ON b.visit_id = v.visit_id
+             WHERE v.clinic_id = $1 AND v.visit_date = $2`,
+            [clinic_id, date]
+        );
+
+        // Top treatments
+        const treatmentsResult = await db.query(
+            `SELECT t.code, t.name,
+                    COUNT(*) as usage_count,
+                    SUM(vt.quantity) as total_quantity,
+                    SUM(vt.total_price) as total_revenue
+             FROM visit_treatments vt
+             JOIN treatments t ON vt.treatment_id = t.treatment_id
+             JOIN visits v ON vt.visit_id = v.visit_id
+             WHERE v.clinic_id = $1 AND v.visit_date = $2
+             GROUP BY t.treatment_id, t.code, t.name
+             ORDER BY usage_count DESC
+             LIMIT 10`,
+            [clinic_id, date]
+        );
+
+        // Doctor statistics
+        const doctorsResult = await db.query(
+            `SELECT di.full_name as doctor_name,
+                    COUNT(v.visit_id) as total_visits,
+                    COUNT(CASE WHEN v.status = 'completed' THEN 1 END) as completed_visits
+             FROM visits v
+             JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             WHERE v.clinic_id = $1 AND v.visit_date = $2
+             GROUP BY di.doctor_id, di.full_name
+             ORDER BY total_visits DESC`,
+            [clinic_id, date]
+        );
+
+        res.json({
+            date,
+            clinic_id,
+            visits: visitsResult.rows[0],
+            revenue: revenueResult.rows[0],
+            topTreatments: treatmentsResult.rows,
+            doctorStats: doctorsResult.rows
+        });
+    } catch (err) {
+        handleError(res, err, 'Failed to generate daily summary');
+    }
+});
+
 app.listen(port, () => {
     console.log(`✅ Server started on port ${port}`);
 });
