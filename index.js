@@ -1263,6 +1263,36 @@ app.delete('/api/treatments/:id', authMiddleware, checkRole('admin'), async (req
 // GROUP 2: VISITS API
 // =====================================================================
 
+// DEBUG endpoint to check all checked-in appointments
+app.get('/api/debug/checked-in-appointments', authMiddleware, async (req, res) => {
+    const { clinic_id } = req.query;
+
+    console.log('=== DEBUG: Checking all checked-in appointments ===');
+    console.log('Clinic ID:', clinic_id);
+
+    try {
+        const { rows } = await db.query(
+            `SELECT a.appointment_id, a.patient_id, a.doctor_id, a.clinic_id,
+                    a.status, a.appointment_time, a.check_in_time,
+                    p.first_name_th, p.last_name_th, p.dn,
+                    di.full_name as doctor_name
+             FROM appointments a
+             JOIN patients p ON a.patient_id = p.patient_id
+             LEFT JOIN doctors_identities di ON a.doctor_id = di.doctor_id
+             WHERE LOWER(a.status) = 'checked-in'
+               ${clinic_id ? 'AND a.clinic_id = $1' : ''}
+             ORDER BY a.check_in_time DESC`,
+            clinic_id ? [clinic_id] : []
+        );
+
+        console.log('Found checked-in appointments:', rows);
+        res.json(rows);
+    } catch (err) {
+        console.error('ERROR in debug endpoint:', err);
+        res.status(500).json({ message: 'Failed to fetch debug data', error: err.message });
+    }
+});
+
 // POST check-in patient (nurse/admin only)
 app.post('/api/visits/check-in', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
     const { patient_id, clinic_id, chief_complaint } = req.body;
@@ -1331,27 +1361,41 @@ app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     const { clinic_id } = req.query;
 
+    // --- CONSOLE LOGS FOR DEBUGGING (as requested) ---
+    console.log('=== DOCTOR QUEUE ENDPOINT CALLED ===');
+    console.log('Doctor ID:', doctor_id);
+    console.log('Clinic ID:', clinic_id);
+    // --- END CONSOLE LOGS ---
+
     if (!clinic_id) {
         return res.status(400).json({ message: 'Clinic ID is required' });
     }
 
     try {
-        // Fetch checked-in appointments for this doctor
+        // --- THE FIX ---
+        // This query now correctly targets the 'visits' table to find patients
+        // who are 'waiting' or 'in_progress' and have been assigned to this doctor.
         const { rows } = await db.query(
-            `SELECT a.appointment_id as visit_id, a.patient_id, a.check_in_time,
-                    LOWER(a.status) as status, 0 as alert_level,
+            `SELECT v.visit_id, v.patient_id, v.check_in_time,
+                    v.status, v.waiting_alert_level as alert_level,
                     p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
                     p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant
-             FROM appointments a
-             JOIN patients p ON a.patient_id = p.patient_id
-             WHERE a.clinic_id = $1 AND a.doctor_id = $2
-               AND LOWER(a.status) = 'checked-in'
-               AND DATE(a.appointment_time) = CURRENT_DATE
-             ORDER BY a.check_in_time ASC`,
+             FROM visits v
+             JOIN patients p ON v.patient_id = p.patient_id
+             WHERE v.clinic_id = $1 AND v.doctor_id = $2
+               AND v.status IN ('waiting', 'in_progress')
+             ORDER BY v.waiting_alert_level DESC NULLS LAST, v.check_in_time ASC`,
             [clinic_id, doctor_id]
         );
+
+        // --- CONSOLE LOGS FOR DEBUGGING ---
+        console.log('Query Result (from visits table):', rows);
+        console.log('Queue Length:', rows.length);
+        // --- END CONSOLE LOGS ---
+
         res.json(rows);
     } catch (err) {
+        console.error('ERROR in doctor queue endpoint:', err);
         handleError(res, err, 'Failed to fetch doctor queue');
     }
 });
