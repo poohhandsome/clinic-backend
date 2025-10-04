@@ -1526,22 +1526,17 @@ app.put('/api/visits/:id/complete', authMiddleware, checkRole('doctor', 'admin')
 
 // POST create examination (doctor/admin only)
 app.post('/api/examinations', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
-    const { visit_id, chief_complaint, vital_signs, physical_exam, diagnosis } = req.body;
+    const { visit_id, chief_complaint, clinical_findings, principal_diagnosis, present_illness, past_medical_history, location } = req.body;
 
     // Validation
     if (!visit_id) {
         return res.status(400).json({ message: 'Visit ID is required' });
     }
 
-    // Validate vital_signs is valid JSON if provided
-    if (vital_signs && typeof vital_signs !== 'object') {
-        return res.status(400).json({ message: 'Vital signs must be a valid JSON object' });
-    }
-
     try {
-        // Verify visit exists and is in_progress
+        // Verify visit exists (use appointments table)
         const visitCheck = await db.query(
-            'SELECT visit_id, status FROM visits WHERE visit_id = $1',
+            'SELECT appointment_id, status FROM appointments WHERE appointment_id = $1',
             [visit_id]
         );
 
@@ -1549,25 +1544,28 @@ app.post('/api/examinations', authMiddleware, checkRole('doctor', 'admin'), asyn
             return res.status(404).json({ message: 'Visit not found' });
         }
 
-        if (visitCheck.rows[0].status !== 'in_progress') {
-            return res.status(400).json({
-                message: 'Can only create examination for visits in progress',
-                currentStatus: visitCheck.rows[0].status
-            });
-        }
+        // Get patient_id from appointment
+        const appointment = visitCheck.rows[0];
+        const patientId = await db.query(
+            'SELECT patient_id FROM appointments WHERE appointment_id = $1',
+            [visit_id]
+        );
 
         const { rows } = await db.query(
             `INSERT INTO examination_findings
-             (visit_id, doctor_id, chief_complaint, vital_signs, physical_exam, diagnosis)
-             VALUES ($1, $2, $3, $4, $5, $6)
+             (visit_id, patient_id, doctor_id, finding_date, chief_complaint, clinical_findings, principal_diagnosis, present_illness, past_medical_history, location)
+             VALUES ($1, $2, $3, CURRENT_DATE, $4, $5, $6, $7, $8, $9)
              RETURNING *`,
             [
                 visit_id,
+                patientId.rows[0].patient_id,
                 req.user.id,
                 chief_complaint || null,
-                vital_signs ? JSON.stringify(vital_signs) : null,
-                physical_exam || null,
-                diagnosis || null
+                clinical_findings || null,
+                principal_diagnosis || null,
+                present_illness || null,
+                past_medical_history || null,
+                location || null
             ]
         );
 
@@ -1608,12 +1606,7 @@ app.get('/api/examinations/visit/:visit_id', authMiddleware, async (req, res) =>
 // PUT update examination (doctor/admin only)
 app.put('/api/examinations/:id', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
     const { id } = req.params;
-    const { chief_complaint, vital_signs, physical_exam, diagnosis } = req.body;
-
-    // Validate vital_signs is valid JSON if provided
-    if (vital_signs && typeof vital_signs !== 'object') {
-        return res.status(400).json({ message: 'Vital signs must be a valid JSON object' });
-    }
+    const { chief_complaint, clinical_findings, principal_diagnosis, present_illness, past_medical_history, location } = req.body;
 
     try {
         // Check ownership (only creating doctor can update, unless admin)
@@ -1632,14 +1625,17 @@ app.put('/api/examinations/:id', authMiddleware, checkRole('doctor', 'admin'), a
 
         const { rows } = await db.query(
             `UPDATE examination_findings
-             SET chief_complaint = $1, vital_signs = $2, physical_exam = $3, diagnosis = $4
-             WHERE finding_id = $5
+             SET chief_complaint = $1, clinical_findings = $2, principal_diagnosis = $3,
+                 present_illness = $4, past_medical_history = $5, location = $6
+             WHERE finding_id = $7
              RETURNING *`,
             [
                 chief_complaint || null,
-                vital_signs ? JSON.stringify(vital_signs) : null,
-                physical_exam || null,
-                diagnosis || null,
+                clinical_findings || null,
+                principal_diagnosis || null,
+                present_illness || null,
+                past_medical_history || null,
+                location || null,
                 id
             ]
         );
@@ -1684,82 +1680,41 @@ app.get('/api/examinations/:id', authMiddleware, async (req, res) => {
 
 // POST create treatment plan (doctor/admin only)
 app.post('/api/treatment-plans', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
-    const { examination_id, medications, instructions, follow_up_date } = req.body;
+    const { visit_id, notes, status } = req.body;
 
     // Validation
-    if (!examination_id) {
-        return res.status(400).json({ message: 'Examination ID is required' });
-    }
-
-    // Validate medications is valid array if provided
-    if (medications) {
-        if (!Array.isArray(medications)) {
-            return res.status(400).json({ message: 'Medications must be an array' });
-        }
-        // Validate each medication has required fields
-        for (const med of medications) {
-            if (!med.name || !med.dosage) {
-                return res.status(400).json({
-                    message: 'Each medication must have name and dosage'
-                });
-            }
-        }
+    if (!visit_id) {
+        return res.status(400).json({ message: 'Visit ID is required' });
     }
 
     try {
-        // Verify examination exists
-        const examCheck = await db.query(
-            'SELECT finding_id FROM examination_findings WHERE finding_id = $1',
-            [examination_id]
+        // Get patient_id from appointment (visit)
+        const visitCheck = await db.query(
+            'SELECT patient_id FROM appointments WHERE appointment_id = $1',
+            [visit_id]
         );
 
-        if (examCheck.rows.length === 0) {
-            return res.status(404).json({ message: 'Examination not found' });
+        if (visitCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Visit not found' });
         }
 
         const { rows } = await db.query(
             `INSERT INTO treatment_plans
-             (examination_id, doctor_id, medications, instructions, follow_up_date)
-             VALUES ($1, $2, $3, $4, $5)
+             (visit_id, patient_id, doctor_id, plan_date, status, notes)
+             VALUES ($1, $2, $3, CURRENT_DATE, $4, $5)
              RETURNING *`,
             [
-                examination_id,
+                visit_id,
+                visitCheck.rows[0].patient_id,
                 req.user.id,
-                medications ? JSON.stringify(medications) : null,
-                instructions || null,
-                follow_up_date || null
+                status || 'active',
+                notes || null
             ]
         );
 
         res.status(201).json(rows[0]);
     } catch (err) {
         handleError(res, err, 'Failed to create treatment plan');
-    }
-});
-
-// GET treatment plan by examination (authenticated)
-app.get('/api/treatment-plans/examination/:exam_id', authMiddleware, async (req, res) => {
-    const { exam_id } = req.params;
-
-    try {
-        const { rows } = await db.query(
-            `SELECT tp.*,
-                    di.full_name as doctor_name,
-                    ef.diagnosis
-             FROM treatment_plans tp
-             JOIN doctors_identities di ON tp.doctor_id = di.doctor_id
-             JOIN examination_findings ef ON tp.examination_id = ef.finding_id
-             WHERE tp.examination_id = $1`,
-            [exam_id]
-        );
-
-        if (rows.length === 0) {
-            return res.status(404).json({ message: 'Treatment plan not found for this examination' });
-        }
-
-        res.json(rows[0]);
-    } catch (err) {
-        handleError(res, err, 'Failed to fetch treatment plan');
     }
 });
 
@@ -1771,16 +1726,16 @@ app.get('/api/treatment-plans/visit/:visit_id', authMiddleware, async (req, res)
         const { rows } = await db.query(
             `SELECT tp.*,
                     di.full_name as doctor_name,
-                    ef.diagnosis
+                    p.first_name_th, p.last_name_th
              FROM treatment_plans tp
-             JOIN examination_findings ef ON tp.examination_id = ef.finding_id
              JOIN doctors_identities di ON tp.doctor_id = di.doctor_id
-             WHERE ef.visit_id = $1`,
+             JOIN patients p ON tp.patient_id = p.patient_id
+             WHERE tp.visit_id = $1`,
             [visit_id]
         );
 
         if (rows.length === 0) {
-            return res.status(404).json({ message: 'Treatment plan not found for this visit' });
+            return res.json(null);
         }
 
         res.json(rows[0]);
@@ -1792,12 +1747,7 @@ app.get('/api/treatment-plans/visit/:visit_id', authMiddleware, async (req, res)
 // PUT update treatment plan (doctor/admin only)
 app.put('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
     const { id } = req.params;
-    const { medications, instructions, follow_up_date } = req.body;
-
-    // Validate medications if provided
-    if (medications && !Array.isArray(medications)) {
-        return res.status(400).json({ message: 'Medications must be an array' });
-    }
+    const { status, notes } = req.body;
 
     try {
         // Check ownership
@@ -1816,13 +1766,12 @@ app.put('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admin')
 
         const { rows } = await db.query(
             `UPDATE treatment_plans
-             SET medications = $1, instructions = $2, follow_up_date = $3
-             WHERE plan_id = $4
+             SET status = COALESCE($1, status), notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP
+             WHERE plan_id = $3
              RETURNING *`,
             [
-                medications ? JSON.stringify(medications) : null,
-                instructions || null,
-                follow_up_date || null,
+                status,
+                notes,
                 id
             ]
         );
@@ -2323,30 +2272,29 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
     const { patient_id } = req.params;
 
     try {
-        // THE FIX: Changed `v.checkout_time` to `v.check_out_time` to match the database schema.
+        // Get all completed visits with examination findings and billing
         const { rows } = await db.query(
             `SELECT
-                v.visit_id, 
-                DATE(v.check_in_time) as visit_date, 
-                v.check_in_time, 
-                v.check_out_time, -- FIX IS HERE
+                v.visit_id,
+                DATE(v.check_in_time) as visit_date,
+                v.check_in_time,
+                v.check_out_time,
                 v.status,
-                di.full_name as doctor_name, 
+                di.full_name as doctor_name,
                 di.specialty,
-                ef.finding_id, 
-                ef.diagnosis, 
-                ef.vital_signs, 
-                ef.physical_exam, 
+                ef.finding_id,
                 ef.chief_complaint,
-                b.billing_id, 
-                b.total_amount, 
-                b.payment_method, 
-                b.status as payment_status
+                ef.clinical_findings,
+                ef.principal_diagnosis,
+                b.billing_id,
+                b.total_amount,
+                b.payment_method,
+                b.payment_status
              FROM visits v
              LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
              LEFT JOIN examination_findings ef ON v.visit_id = ef.visit_id
              LEFT JOIN billing b ON v.visit_id = b.visit_id
-             WHERE v.patient_id = $1
+             WHERE v.patient_id = $1 AND v.status IN ('completed', 'checked-out')
              ORDER BY v.check_in_time DESC`,
             [patient_id]
         );
@@ -2357,7 +2305,7 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
 
         if (visitIds.length > 0) {
             const treatmentsResult = await db.query(
-                `SELECT vt.visit_id, vt.quantity, vt.price, vt.total_price, t.code, t.name, t.category
+                `SELECT vt.visit_id, vt.actual_price as price, vt.tooth_numbers, vt.notes, t.code, t.name, t.category
                  FROM visit_treatments vt JOIN treatments t ON vt.treatment_id = t.treatment_id
                  WHERE vt.visit_id = ANY($1::int[])
                  ORDER BY vt.visit_treatment_id`,
@@ -2365,11 +2313,10 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
             );
             treatments = treatmentsResult.rows;
 
-            const findingIds = rows.map(r => r.finding_id).filter(id => id);
-            if (findingIds.length > 0) {
+            if (visitIds.length > 0) {
                 const plansResult = await db.query(
-                    `SELECT * FROM treatment_plans WHERE examination_id = ANY($1::int[])`,
-                    [findingIds]
+                    `SELECT * FROM treatment_plans WHERE visit_id = ANY($1::int[])`,
+                    [visitIds]
                 );
                 plans = plansResult.rows;
             }
@@ -2378,7 +2325,7 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
         const history = rows.map(visit => ({
             ...visit,
             treatments: treatments.filter(t => t.visit_id === visit.visit_id),
-            plan: plans.find(p => p.examination_id === visit.finding_id) || null
+            plan: plans.find(p => p.visit_id === visit.visit_id) || null
         }));
 
         res.json(history);
