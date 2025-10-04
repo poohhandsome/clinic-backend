@@ -5,32 +5,95 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 const { format, addMonths, startOfMonth, getDay, eachDayOfInterval, addDays, endOfMonth, getWeekOfMonth } = require('date-fns');
 const db = require('./db');
 
 const app = express();
 const port = process.env.PORT || 3001;
 
-app.use(cors());
+// Apply security headers
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            styleSrc: ["'self'", "'unsafe-inline'"],
+            scriptSrc: ["'self'"],
+            imgSrc: ["'self'", "data:", "https:"],
+        },
+    },
+    crossOriginEmbedderPolicy: false, // Allow embedding if needed
+}));
+
+// Configure CORS to only allow requests from your frontend domain
+const corsOptions = {
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    credentials: true,
+    optionsSuccessStatus: 200,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
+
+// --- Force HTTPS in Production ---
+if (process.env.NODE_ENV === 'production') {
+    app.use((req, res, next) => {
+        if (req.header('x-forwarded-proto') !== 'https') {
+            return res.redirect(301, `https://${req.header('host')}${req.url}`);
+        }
+        next();
+    });
+}
+
+// --- Rate Limiting Configuration ---
+// Rate limiter for login attempts
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // Limit each IP to 5 login requests per windowMs
+    message: 'Too many login attempts from this IP, please try again after 15 minutes.',
+    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+    skipSuccessfulRequests: false, // Count successful requests
+});
 
 // --- Authentication Routes ---
 // in index.js (REPLACE THIS ENDPOINT)
 
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body;
+
+    // Input validation
+    if (!username || !password) {
+        return res.status(400).json({ msg: 'Username and password are required' });
+    }
+
+    if (typeof username !== 'string' || typeof password !== 'string') {
+        return res.status(400).json({ msg: 'Invalid input format' });
+    }
+
+    if (username.trim().length === 0 || password.length === 0) {
+        return res.status(400).json({ msg: 'Username and password cannot be empty' });
+    }
+
+    if (username.length > 255 || password.length > 255) {
+        return res.status(400).json({ msg: 'Input exceeds maximum length' });
+    }
+
     try {
         let user = null;
         let userRole = '';
 
         // Step 1: Check the 'workers' table
-        const workerResult = await db.query('SELECT id, username, password_hash FROM workers WHERE username = $1', [username]);
+        const workerResult = await db.query('SELECT id, username, password_hash FROM workers WHERE username = $1', [username.trim()]);
         if (workerResult.rows.length > 0) {
             user = workerResult.rows[0];
             userRole = 'nurse';
         } else {
             // Step 2: If not in 'workers', check the 'doctors_identities' table
-            const doctorResult = await db.query('SELECT doctor_id AS id, email AS username, password_hash FROM doctors_identities WHERE email = $1', [username]);
+            const doctorResult = await db.query('SELECT doctor_id AS id, email AS username, password_hash FROM doctors_identities WHERE email = $1', [username.trim()]);
             if (doctorResult.rows.length > 0) {
                 user = doctorResult.rows[0];
                 userRole = 'doctor';
@@ -63,8 +126,7 @@ app.post('/api/login', async (req, res) => {
         });
 
     } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ message: 'Server Error' });
+        handleError(res, err, 'Login failed. Please try again later.');
     }
 });
 // --- Auth Middleware ---
@@ -77,6 +139,47 @@ const authMiddleware = (req, res, next) => {
         next();
     } catch (err) {
         res.status(401).json({ msg: 'Token is not valid' });
+    }
+};
+
+// --- Role-Based Authorization Middleware ---
+const checkRole = (...allowedRoles) => {
+    return (req, res, next) => {
+        if (!req.user) {
+            return res.status(401).json({ msg: 'Authentication required' });
+        }
+
+        if (!allowedRoles.includes(req.user.role)) {
+            return res.status(403).json({
+                msg: 'Access denied. You do not have permission to perform this action.',
+                requiredRole: allowedRoles,
+                yourRole: req.user.role
+            });
+        }
+
+        next();
+    };
+};
+
+// --- Centralized Error Handler ---
+const handleError = (res, err, customMessage = 'Server Error') => {
+    // Log full error details for debugging (only visible to developers)
+    console.error('Error Details:', {
+        message: err.message,
+        stack: process.env.NODE_ENV !== 'production' ? err.stack : undefined,
+        timestamp: new Date().toISOString()
+    });
+
+    // Send safe error message to client
+    if (process.env.NODE_ENV === 'production') {
+        res.status(500).json({ message: customMessage });
+    } else {
+        // In development, include more details for debugging
+        res.status(500).json({
+            message: customMessage,
+            error: err.message,
+            stack: err.stack
+        });
     }
 };
 
@@ -115,11 +218,34 @@ app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
     }
 });
 
-app.post('/api/doctors', authMiddleware, async (req, res) => {
+app.post('/api/doctors', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
     const { fullName, specialty, clinicIds, email, password, color, status } = req.body;
     if (!fullName || !clinicIds || !Array.isArray(clinicIds) || clinicIds.length === 0 || !email || !password) {
         return res.status(400).json({ message: 'Full name, clinic(s), email, and password are required.' });
     }
+
+    // Password strength validation
+    if (password.length < 8) {
+        return res.status(400).json({ message: 'Password must be at least 8 characters long.' });
+    }
+
+    const hasUpperCase = /[A-Z]/.test(password);
+    const hasLowerCase = /[a-z]/.test(password);
+    const hasNumbers = /\d/.test(password);
+    const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+
+    if (!hasUpperCase || !hasLowerCase || !hasNumbers) {
+        return res.status(400).json({
+            message: 'Password must contain at least one uppercase letter, one lowercase letter, and one number.'
+        });
+    }
+
+    // Email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+        return res.status(400).json({ message: 'Please provide a valid email address.' });
+    }
+
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
@@ -151,12 +277,38 @@ app.post('/api/doctors', authMiddleware, async (req, res) => {
     }
 });
 
-app.put('/api/doctors/:id', authMiddleware, async (req, res) => {
+app.put('/api/doctors/:id', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
     const { id } = req.params;
     const { clinicIds, specialty, email, color, status, password } = req.body;
     if (!Array.isArray(clinicIds)) {
         return res.status(400).json({ message: 'clinicIds must be an array.' });
     }
+
+    // Password strength validation (only if password is being updated)
+    if (password) {
+        if (password.length < 8) {
+            return res.status(400).json({ message: 'Password must be at least 8 characters long.' });
+        }
+
+        const hasUpperCase = /[A-Z]/.test(password);
+        const hasLowerCase = /[a-z]/.test(password);
+        const hasNumbers = /\d/.test(password);
+
+        if (!hasUpperCase || !hasLowerCase || !hasNumbers) {
+            return res.status(400).json({
+                message: 'Password must contain at least one uppercase letter, one lowercase letter, and one number.'
+            });
+        }
+    }
+
+    // Email validation (if email is being updated)
+    if (email) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+            return res.status(400).json({ message: 'Please provide a valid email address.' });
+        }
+    }
+
     const client = await db.pool.connect();
     try {
         await client.query('BEGIN');
@@ -200,13 +352,48 @@ app.put('/api/doctors/:id', authMiddleware, async (req, res) => {
 });
 
 // --- Patient Endpoints ---
-app.post('/api/patients', authMiddleware, async (req, res) => {
+app.post('/api/patients', authMiddleware, checkRole('nurse', 'doctor', 'admin'), async (req, res) => {
     const {
         dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th,
         title_en, first_name_en, last_name_en, nickname, gender, date_of_birth,
         chronic_diseases, allergies, mobile_phone, home_phone, line_id, email,
         address, sub_district, district, province, country, zip_code
     } = req.body;
+
+    // Input validation
+    if (!first_name_th || !last_name_th) {
+        return res.status(400).json({ message: 'First name and last name (Thai) are required.' });
+    }
+
+    // Email validation (if provided)
+    if (email && email.trim().length > 0) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+            return res.status(400).json({ message: 'Please provide a valid email address.' });
+        }
+    }
+
+    // Mobile phone validation (if provided) - basic Thai phone number format
+    if (mobile_phone && mobile_phone.trim().length > 0) {
+        const phoneRegex = /^[0-9]{9,10}$/;
+        if (!phoneRegex.test(mobile_phone.replace(/[-\s]/g, ''))) {
+            return res.status(400).json({ message: 'Please provide a valid mobile phone number (9-10 digits).' });
+        }
+    }
+
+    // Gender validation
+    if (gender && !['male', 'female', 'other'].includes(gender.toLowerCase())) {
+        return res.status(400).json({ message: 'Gender must be male, female, or other.' });
+    }
+
+    // Date of birth validation
+    if (date_of_birth) {
+        const dob = new Date(date_of_birth);
+        if (isNaN(dob.getTime()) || dob > new Date()) {
+            return res.status(400).json({ message: 'Please provide a valid date of birth.' });
+        }
+    }
+
     try {
         const { rows } = await db.query(
             `INSERT INTO patients (dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th, title_en, first_name_en, last_name_en, nickname, gender, date_of_birth, chronic_diseases, allergies, mobile_phone, home_phone, line_id, email, address, sub_district, district, province, country, zip_code)
@@ -614,7 +801,7 @@ app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
 // ***************************************************************
 // ** UPGRADED: Creates appointment with new patient_id link **
 // ***************************************************************
-app.post('/api/appointments', authMiddleware, async (req, res) => {
+app.post('/api/appointments', authMiddleware, checkRole('nurse', 'doctor', 'admin'), async (req, res) => {
     const {
         customer_id, patient_id, doctor_id, clinic_id, appointment_date,
         appointment_time, status, patient_name_at_booking,
@@ -622,9 +809,40 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
         duration_minutes // <-- NEW FIELD
     } = req.body;
 
+    // Comprehensive input validation
     if (!doctor_id || !clinic_id || !appointment_date || !appointment_time) {
         return res.status(400).json({ msg: 'Missing required appointment details.' });
     }
+
+    // Validate date format
+    const appointmentDate = new Date(appointment_date);
+    if (isNaN(appointmentDate.getTime())) {
+        return res.status(400).json({ msg: 'Invalid appointment date format.' });
+    }
+
+    // Validate time format (HH:MM)
+    const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
+    if (!timeRegex.test(appointment_time)) {
+        return res.status(400).json({ msg: 'Invalid time format. Use HH:MM format.' });
+    }
+
+    // Validate appointment is not in the past
+    const appointmentDateTime = new Date(`${appointment_date} ${appointment_time}`);
+    if (appointmentDateTime < new Date()) {
+        return res.status(400).json({ msg: 'Cannot create appointments in the past.' });
+    }
+
+    // Validate duration (if provided)
+    if (duration_minutes && (duration_minutes < 5 || duration_minutes > 480)) {
+        return res.status(400).json({ msg: 'Duration must be between 5 and 480 minutes.' });
+    }
+
+    // Validate status (if provided)
+    const validStatuses = ['pending_confirmation', 'confirmed', 'checked-in', 'completed', 'cancelled'];
+    if (status && !validStatuses.includes(status.toLowerCase())) {
+        return res.status(400).json({ msg: 'Invalid appointment status.' });
+    }
+
     try {
         const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
         const duration = duration_minutes || 30; // Default to 30 mins if not provided
@@ -868,6 +1086,28 @@ app.post('/api/patients/:patientId/documents', authMiddleware, async (req, res) 
     }
 });
 
+
+// --- Health Check Endpoint ---
+app.get('/health', async (req, res) => {
+    try {
+        // Check database connection
+        await db.query('SELECT 1');
+        res.status(200).json({
+            status: 'ok',
+            timestamp: new Date().toISOString(),
+            uptime: process.uptime(),
+            environment: process.env.NODE_ENV || 'development',
+            database: 'connected'
+        });
+    } catch (err) {
+        res.status(503).json({
+            status: 'error',
+            timestamp: new Date().toISOString(),
+            database: 'disconnected',
+            error: process.env.NODE_ENV === 'production' ? 'Database unavailable' : err.message
+        });
+    }
+});
 
 app.listen(port, () => {
     console.log(`✅ Server started on port ${port}`);
