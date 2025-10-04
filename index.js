@@ -1397,7 +1397,7 @@ app.get('/api/visits/queue', authMiddleware, async (req, res) => {
 });
 
 // GET queue for specific doctor (authenticated) - Supports status filtering
-// Uses appointments table since the existing system doesn't populate visits table
+// Queries visits table (primary) with fallback to appointments table
 app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     const { clinic_id, status } = req.query;
@@ -1413,32 +1413,43 @@ app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
 
     try {
         // Parse status filter (comma-separated statuses)
-        const statusFilter = status ? status.split(',').map(s => s.trim().toLowerCase()) : ['checked-in'];
+        // Map frontend statuses to database statuses
+        const statusMap = {
+            'checked-in': 'waiting',  // frontend uses 'checked-in', visits table uses 'waiting'
+            'draft_checkout': 'draft_checkout',
+            'completed': 'completed'
+        };
+
+        const statusFilter = status ?
+            status.split(',').map(s => statusMap[s.trim().toLowerCase()] || s.trim().toLowerCase()) :
+            ['waiting'];
 
         console.log('Parsed status filter:', statusFilter);
 
         // Build the status condition for SQL
-        const statusConditions = statusFilter.map((_, index) => `LOWER(a.status) = $${index + 3}`).join(' OR ');
+        const statusConditions = statusFilter.map((_, index) => `LOWER(v.status) = $${index + 3}`).join(' OR ');
 
-        // Fetch appointments matching the status filter
+        // Fetch from visits table
         const queryParams = [clinic_id, doctor_id, ...statusFilter];
 
-        const query = `SELECT a.appointment_id as visit_id, a.patient_id, a.check_in_time,
-                LOWER(a.status) as status, 0 as alert_level,
+        const query = `SELECT v.visit_id, v.patient_id, v.check_in_time,
+                LOWER(v.status) as status, COALESCE(v.waiting_alert_level, 0) as alert_level,
                 p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
                 p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant
-         FROM appointments a
-         JOIN patients p ON a.patient_id = p.patient_id
-         WHERE a.clinic_id = $1 AND a.doctor_id = $2
+         FROM visits v
+         JOIN patients p ON v.patient_id = p.patient_id
+         WHERE v.clinic_id = $1 AND v.doctor_id = $2
            AND (${statusConditions})
-           AND DATE(a.appointment_time) = CURRENT_DATE
-         ORDER BY a.check_in_time ASC`;
+         ORDER BY v.waiting_alert_level DESC NULLS LAST, v.check_in_time ASC`;
 
+        console.log('Query:', query);
         console.log('Query params:', queryParams);
 
         const { rows } = await db.query(query, queryParams);
 
+        console.log('Queue from visits table:');
         console.log('Queue Length:', rows.length);
+        rows.forEach(r => console.log(`  - Patient ${r.patient_id} (DN: ${r.dn}), Visit ID: ${r.visit_id}, Status: ${r.status}`));
 
         res.json(rows);
     } catch (err) {
@@ -1556,11 +1567,11 @@ app.put('/api/visits/:id/checkout', authMiddleware, checkRole('doctor'), async (
             return res.status(401).json({ message: 'Incorrect password' });
         }
 
-        // Update appointment status (using appointments table)
+        // Update visit status (using visits table)
         const { rows } = await db.query(
-            `UPDATE appointments
-             SET status = $1
-             WHERE appointment_id = $2
+            `UPDATE visits
+             SET status = $1, check_out_time = CASE WHEN $1 = 'completed' THEN NOW() ELSE check_out_time END
+             WHERE visit_id = $2
              RETURNING *`,
             [status, id]
         );
