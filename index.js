@@ -13,6 +13,9 @@ const db = require('./db');
 const app = express();
 const port = process.env.PORT || 3001;
 
+// Trust proxy - Required when behind reverse proxy (Render, Heroku, etc.)
+app.set('trust proxy', 1);
+
 // Apply security headers
 app.use(helmet({
     contentSecurityPolicy: {
@@ -53,10 +56,15 @@ if (process.env.NODE_ENV === 'production') {
 const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 5, // Limit each IP to 5 login requests per windowMs
-    message: 'Too many login attempts from this IP, please try again after 15 minutes.',
     standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
     legacyHeaders: false, // Disable the `X-RateLimit-*` headers
     skipSuccessfulRequests: false, // Count successful requests
+    handler: (req, res) => {
+        res.status(429).json({
+            msg: 'Too many login attempts from this IP, please try again after 15 minutes.',
+            retryAfter: Math.ceil(req.rateLimit.resetTime / 1000 / 60) + ' minutes'
+        });
+    }
 });
 
 // --- Authentication Routes ---
