@@ -697,8 +697,42 @@ app.get('/api/all-appointments', authMiddleware, async (req, res) => {
 app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { status, doctor_id, appointment_date, appointment_time, purpose, room_id, confirmation_notes } = req.body;
-    
+
+    // Use a database transaction to ensure data integrity
+    const client = await db.pool.connect();
+
     try {
+        await client.query('BEGIN');
+
+        // Check if the status is being set to 'Checked-in'
+        if (status && status.toLowerCase() === 'checked-in') {
+            // Step 1: Get the appointment details we need to create a visit
+            const appointmentRes = await client.query(
+                'SELECT patient_id, clinic_id, doctor_id FROM appointments WHERE appointment_id = $1',
+                [id]
+            );
+
+            if (appointmentRes.rows.length === 0) {
+                throw new Error('Appointment not found.');
+            }
+
+            const { patient_id, clinic_id, doctor_id: assigned_doctor_id } = appointmentRes.rows[0];
+
+            if (!patient_id) {
+                throw new Error('Cannot check-in. This appointment is not linked to a patient record.');
+            }
+
+            // Step 2: Insert a new record into the `visits` table
+            // This places the patient into the live queue for the doctor
+            await client.query(
+                `INSERT INTO visits (patient_id, clinic_id, doctor_id, appointment_id, check_in_time, status)
+                 VALUES ($1, $2, $3, $4, NOW(), 'waiting')
+                 ON CONFLICT (appointment_id) DO NOTHING`, // Prevents creating duplicate visits for the same appointment
+                [patient_id, clinic_id, assigned_doctor_id, id]
+            );
+        }
+
+        // --- The original logic to update the appointments table ---
         const fields = [];
         const values = [];
         let query = 'UPDATE appointments SET ';
@@ -706,18 +740,14 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
         if (status) {
             fields.push('status = $' + (fields.length + 1));
             values.push(status);
-            // **THE CRITICAL LOGIC IS HERE**: If the status is 'Checked-in',
-            // the database will automatically record the current time.
             if (status.toLowerCase() === 'checked-in') {
                 fields.push('check_in_time = NOW()');
             }
         }
         if (doctor_id && appointment_date && appointment_time) {
             const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
-            fields.push('doctor_id = $' + (fields.length + 1));
-            values.push(doctor_id);
-            fields.push('appointment_time = $' + (fields.length + 1));
-            values.push(appointmentTimestamp);
+            fields.push('doctor_id = $' + (fields.length + 1), 'appointment_time = $' + (fields.length + 2));
+            values.push(doctor_id, appointmentTimestamp);
         }
         if (purpose) {
             fields.push('purpose = $' + (fields.length + 1));
@@ -733,6 +763,7 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
         }
 
         if (fields.length === 0) {
+            await client.query('ROLLBACK');
             return res.status(400).json({ message: 'No valid fields provided for update.' });
         }
 
@@ -740,13 +771,23 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
         query += ' WHERE appointment_id = $' + (values.length + 1) + ' RETURNING *';
         values.push(id);
 
-        const { rows } = await db.query(query, values);
+        const { rows } = await client.query(query, values);
+        
+        // If everything is successful, commit the transaction
+        await client.query('COMMIT');
+        
         res.json(rows[0]);
+
     } catch (err) {
-        console.error("Error in PATCH /api/appointments/:id:", err.message);
-        res.status(500).json({ message: err.message || 'Server Error' });
+        // If any step fails, roll back all changes
+        await client.query('ROLLBACK');
+        handleError(res, err, `Failed to update appointment: ${err.message}`);
+    } finally {
+        // Release the database client back to the pool
+        client.release();
     }
 });
+
 
 
 
