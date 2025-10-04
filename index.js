@@ -1921,6 +1921,7 @@ app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res
     const { visit_id } = req.params;
 
     try {
+        console.log(`[LOG] Fetching treatments for visit_id: ${visit_id}`); // <-- ADDED LOG
         const { rows } = await db.query(
             `SELECT vt.*,
                     t.code, t.name, t.category, t.standard_price
@@ -1931,8 +1932,11 @@ app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res
             [visit_id]
         );
 
+        console.log(`[LOG] Found ${rows.length} treatments for visit_id: ${visit_id}`); // <-- ADDED LOG
         res.json(rows);
     } catch (err) {
+        // THIS WILL PRINT THE PRECISE DATABASE ERROR TO YOUR BACKEND CONSOLE
+        console.error(`[ERROR] in /api/visit-treatments/visit/:visit_id:`, err); // <-- ADDED LOG
         handleError(res, err, 'Failed to fetch visit treatments');
     }
 });
@@ -2323,9 +2327,7 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
     const { patient_id } = req.params;
 
     try {
-        // THE FIX:
-        // 1. Changed `v.visit_date` to `DATE(v.check_in_time) as visit_date` to correctly get the date.
-        // 2. Changed `v.chief_complaint` to `ef.chief_complaint` to get it from the correct table.
+        console.log(`[LOG] Fetching history for patient_id: ${patient_id}`); // <-- ADDED LOG
         const { rows } = await db.query(
             `SELECT
                 v.visit_id, 
@@ -2333,7 +2335,7 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
                 v.check_in_time, 
                 v.checkout_time, 
                 v.status,
-                ef.chief_complaint, -- Switched from v.chief_complaint
+                ef.chief_complaint,
                 di.full_name as doctor_name, 
                 di.specialty,
                 ef.finding_id, 
@@ -2357,8 +2359,8 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
              ORDER BY v.check_in_time DESC`,
             [patient_id]
         );
+        console.log(`[LOG] Found ${rows.length} visit history entries for patient_id: ${patient_id}`); // <-- ADDED LOG
 
-        // This part of the logic remains the same and is correct
         const visitIds = rows.map(r => r.visit_id);
         let treatments = [];
 
@@ -2382,6 +2384,8 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
 
         res.json(history);
     } catch (err) {
+        // THIS WILL PRINT THE PRECISE DATABASE ERROR TO YOUR BACKEND CONSOLE
+        console.error(`[ERROR] in /api/history/patient/:patient_id:`, err); // <-- ADDED LOG
         handleError(res, err, 'Failed to fetch patient history');
     }
 });
