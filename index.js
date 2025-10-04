@@ -1434,14 +1434,26 @@ app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
 
         const query = `SELECT v.visit_id, v.patient_id, v.check_in_time,
                 LOWER(v.status) as status,
-                COALESCE(NULLIF(v.waiting_alert_level, '')::INTEGER, 0) as alert_level,
+                CASE
+                    WHEN v.waiting_alert_level ~ '^[0-9]+$' THEN v.waiting_alert_level::INTEGER
+                    WHEN LOWER(v.waiting_alert_level) = 'urgent' THEN 3
+                    WHEN LOWER(v.waiting_alert_level) = 'high' THEN 2
+                    WHEN LOWER(v.waiting_alert_level) = 'medium' THEN 1
+                    ELSE 0
+                END as alert_level,
                 p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
                 p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant
          FROM visits v
          JOIN patients p ON v.patient_id = p.patient_id
          WHERE v.clinic_id = $1 AND v.doctor_id = $2
            AND (${statusConditions})
-         ORDER BY COALESCE(NULLIF(v.waiting_alert_level, '')::INTEGER, 0) DESC, v.check_in_time ASC`;
+         ORDER BY CASE
+                    WHEN v.waiting_alert_level ~ '^[0-9]+$' THEN v.waiting_alert_level::INTEGER
+                    WHEN LOWER(v.waiting_alert_level) = 'urgent' THEN 3
+                    WHEN LOWER(v.waiting_alert_level) = 'high' THEN 2
+                    WHEN LOWER(v.waiting_alert_level) = 'medium' THEN 1
+                    ELSE 0
+                END DESC, v.check_in_time ASC`;
 
         console.log('Query:', query);
         console.log('Query params:', queryParams);
