@@ -1613,9 +1613,9 @@ app.post('/api/examinations', authMiddleware, checkRole('doctor', 'admin'), asyn
     }
 
     try {
-        // Verify visit exists (use appointments table)
+        // Verify visit exists (use visits table)
         const visitCheck = await db.query(
-            'SELECT appointment_id, status FROM appointments WHERE appointment_id = $1',
+            'SELECT visit_id, patient_id, status FROM visits WHERE visit_id = $1',
             [visit_id]
         );
 
@@ -1623,12 +1623,7 @@ app.post('/api/examinations', authMiddleware, checkRole('doctor', 'admin'), asyn
             return res.status(404).json({ message: 'Visit not found' });
         }
 
-        // Get patient_id from appointment
-        const appointment = visitCheck.rows[0];
-        const patientId = await db.query(
-            'SELECT patient_id FROM appointments WHERE appointment_id = $1',
-            [visit_id]
-        );
+        const visit = visitCheck.rows[0];
 
         const { rows } = await db.query(
             `INSERT INTO examination_findings
@@ -1637,7 +1632,7 @@ app.post('/api/examinations', authMiddleware, checkRole('doctor', 'admin'), asyn
              RETURNING *`,
             [
                 visit_id,
-                patientId.rows[0].patient_id,
+                visit.patient_id,
                 req.user.id,
                 chief_complaint || null,
                 clinical_findings || null,
@@ -1661,12 +1656,12 @@ app.get('/api/examinations/visit/:visit_id', authMiddleware, async (req, res) =>
     try {
         const { rows } = await db.query(
             `SELECT ef.*,
-                    a.patient_id, a.appointment_time as visit_date, a.check_in_time,
+                    v.patient_id, v.check_in_time,
                     p.dn, p.first_name_th, p.last_name_th,
                     di.full_name as doctor_name, di.specialty
              FROM examination_findings ef
-             JOIN appointments a ON ef.visit_id = a.appointment_id
-             JOIN patients p ON a.patient_id = p.patient_id
+             JOIN visits v ON ef.visit_id = v.visit_id
+             JOIN patients p ON v.patient_id = p.patient_id
              JOIN doctors_identities di ON ef.doctor_id = di.doctor_id
              WHERE ef.visit_id = $1`,
             [visit_id]
