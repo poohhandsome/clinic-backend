@@ -2323,13 +2323,25 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
     const { patient_id } = req.params;
 
     try {
-        // THE FIX: Removed the problematic LEFT JOIN to treatment_plans
+        // THE FIX: Changed `v.checkout_time` to `v.check_out_time` to match the database schema.
         const { rows } = await db.query(
             `SELECT
-                v.visit_id, DATE(v.check_in_time) as visit_date, v.check_in_time, v.checkout_time, v.status,
-                di.full_name as doctor_name, di.specialty,
-                ef.finding_id, ef.diagnosis, ef.vital_signs, ef.physical_exam, ef.chief_complaint,
-                b.billing_id, b.total_amount, b.payment_method, b.status as payment_status
+                v.visit_id, 
+                DATE(v.check_in_time) as visit_date, 
+                v.check_in_time, 
+                v.check_out_time, -- FIX IS HERE
+                v.status,
+                di.full_name as doctor_name, 
+                di.specialty,
+                ef.finding_id, 
+                ef.diagnosis, 
+                ef.vital_signs, 
+                ef.physical_exam, 
+                ef.chief_complaint,
+                b.billing_id, 
+                b.total_amount, 
+                b.payment_method, 
+                b.status as payment_status
              FROM visits v
              LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
              LEFT JOIN examination_findings ef ON v.visit_id = ef.visit_id
@@ -2344,7 +2356,6 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
         let plans = [];
 
         if (visitIds.length > 0) {
-            // Fetch treatments separately (this query is correct)
             const treatmentsResult = await db.query(
                 `SELECT vt.visit_id, vt.quantity, vt.price, vt.total_price, t.code, t.name, t.category
                  FROM visit_treatments vt JOIN treatments t ON vt.treatment_id = t.treatment_id
@@ -2353,9 +2364,8 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
                 [visitIds]
             );
             treatments = treatmentsResult.rows;
-            
-            // THE FIX: Fetch treatment plans separately using finding_id if available
-            const findingIds = rows.map(r => r.finding_id).filter(id => id); // Get all valid finding_id
+
+            const findingIds = rows.map(r => r.finding_id).filter(id => id);
             if (findingIds.length > 0) {
                 const plansResult = await db.query(
                     `SELECT * FROM treatment_plans WHERE examination_id = ANY($1::int[])`,
@@ -2365,11 +2375,9 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
             }
         }
 
-        // Combine the data
         const history = rows.map(visit => ({
             ...visit,
             treatments: treatments.filter(t => t.visit_id === visit.visit_id),
-            // Find the plan that matches this visit's examination finding
             plan: plans.find(p => p.examination_id === visit.finding_id) || null
         }));
 
