@@ -1584,19 +1584,19 @@ app.get('/api/examinations/visit/:visit_id', authMiddleware, async (req, res) =>
     try {
         const { rows } = await db.query(
             `SELECT ef.*,
-                    v.patient_id, v.visit_date, v.check_in_time,
+                    a.patient_id, a.appointment_time as visit_date, a.check_in_time,
                     p.dn, p.first_name_th, p.last_name_th,
                     di.full_name as doctor_name, di.specialty
              FROM examination_findings ef
-             JOIN visits v ON ef.visit_id = v.visit_id
-             JOIN patients p ON v.patient_id = p.patient_id
+             JOIN appointments a ON ef.visit_id = a.appointment_id
+             JOIN patients p ON a.patient_id = p.patient_id
              JOIN doctors_identities di ON ef.doctor_id = di.doctor_id
              WHERE ef.visit_id = $1`,
             [visit_id]
         );
 
         if (rows.length === 0) {
-            return res.status(404).json({ message: 'Examination not found for this visit' });
+            return res.json(null);
         }
 
         res.json(rows[0]);
@@ -2323,21 +2323,22 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
     const { patient_id } = req.params;
 
     try {
-        // Get all visits with exams, treatments, and bills
+        // Get all appointments (visits) with exams, treatments, and bills
         const { rows } = await db.query(
             `SELECT
-                v.visit_id, v.visit_date, v.check_in_time, v.checkout_time, v.status, v.chief_complaint,
+                a.appointment_id as visit_id, a.appointment_time as visit_date,
+                a.check_in_time, a.status, a.complaint as chief_complaint,
                 di.full_name as doctor_name, di.specialty,
                 ef.finding_id, ef.diagnosis, ef.vital_signs, ef.physical_exam,
                 tp.plan_id, tp.medications, tp.instructions, tp.follow_up_date,
                 b.billing_id, b.total_amount, b.payment_method, b.status as payment_status
-             FROM visits v
-             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
-             LEFT JOIN examination_findings ef ON v.visit_id = ef.visit_id
+             FROM appointments a
+             LEFT JOIN doctors_identities di ON a.doctor_id = di.doctor_id
+             LEFT JOIN examination_findings ef ON a.appointment_id = ef.visit_id
              LEFT JOIN treatment_plans tp ON ef.finding_id = tp.examination_id
-             LEFT JOIN billing b ON v.visit_id = b.visit_id
-             WHERE v.patient_id = $1
-             ORDER BY v.visit_date DESC, v.check_in_time DESC`,
+             LEFT JOIN billing b ON a.appointment_id = b.visit_id
+             WHERE a.patient_id = $1 AND a.status IN ('completed', 'checked-out')
+             ORDER BY a.appointment_time DESC, a.check_in_time DESC`,
             [patient_id]
         );
 
