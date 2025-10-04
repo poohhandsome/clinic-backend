@@ -1963,21 +1963,12 @@ app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res
 // PUT update visit treatment (doctor/nurse/admin)
 app.put('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
     const { id } = req.params;
-    const { quantity, custom_price } = req.body;
-
-    if (!quantity) {
-        return res.status(400).json({ message: 'Quantity is required' });
-    }
-
-    const qty = parseInt(quantity);
-    if (isNaN(qty) || qty <= 0) {
-        return res.status(400).json({ message: 'Quantity must be a positive number' });
-    }
+    const { quantity, custom_price, tooth_numbers, notes, location, clinical_findings, diagnosis } = req.body;
 
     try {
-        // Get current visit treatment and standard price
+        // Get current visit treatment
         const current = await db.query(
-            `SELECT vt.price, t.standard_price
+            `SELECT vt.*, t.standard_price
              FROM visit_treatments vt
              JOIN treatments t ON vt.treatment_id = t.treatment_id
              WHERE vt.visit_treatment_id = $1`,
@@ -1988,15 +1979,61 @@ app.put('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse'
             return res.status(404).json({ message: 'Visit treatment not found' });
         }
 
-        const price = custom_price !== undefined ? parseFloat(custom_price) : current.rows[0].price;
-        const total = price * qty;
+        // Build dynamic update query
+        const updates = [];
+        const values = [];
+        let paramIndex = 1;
 
+        if (quantity !== undefined) {
+            const qty = parseInt(quantity);
+            if (isNaN(qty) || qty <= 0) {
+                return res.status(400).json({ message: 'Quantity must be a positive number' });
+            }
+            updates.push(`quantity = $${paramIndex++}`);
+            values.push(qty);
+        }
+
+        if (custom_price !== undefined) {
+            updates.push(`price = $${paramIndex++}`);
+            values.push(parseFloat(custom_price));
+        }
+
+        if (tooth_numbers !== undefined) {
+            updates.push(`tooth_numbers = $${paramIndex++}`);
+            values.push(tooth_numbers);
+        }
+
+        if (notes !== undefined) {
+            updates.push(`notes = $${paramIndex++}`);
+            values.push(notes);
+        }
+
+        if (location !== undefined) {
+            updates.push(`location = $${paramIndex++}`);
+            values.push(location);
+        }
+
+        if (clinical_findings !== undefined) {
+            updates.push(`clinical_findings = $${paramIndex++}`);
+            values.push(clinical_findings);
+        }
+
+        if (diagnosis !== undefined) {
+            updates.push(`diagnosis = $${paramIndex++}`);
+            values.push(diagnosis);
+        }
+
+        if (updates.length === 0) {
+            return res.status(400).json({ message: 'No fields to update' });
+        }
+
+        values.push(id);
         const { rows } = await db.query(
             `UPDATE visit_treatments
-             SET quantity = $1, price = $2, total_price = $3
-             WHERE visit_treatment_id = $4
+             SET ${updates.join(', ')}
+             WHERE visit_treatment_id = $${paramIndex}
              RETURNING *`,
-            [qty, price, total, id]
+            values
         );
 
         res.json(rows[0]);
