@@ -1285,10 +1285,10 @@ app.post('/api/visits/check-in', authMiddleware, checkRole('nurse', 'admin'), as
 
         // Create visit with status 'waiting'
         const { rows } = await db.query(
-            `INSERT INTO visits (patient_id, clinic_id, visit_date, check_in_time, status, chief_complaint)
-             VALUES ($1, $2, CURRENT_DATE, NOW(), 'waiting', $3)
+            `INSERT INTO visits (patient_id, clinic_id, check_in_time, status)
+             VALUES ($1, $2, NOW(), 'waiting')
              RETURNING *`,
-            [patient_id, clinic_id, chief_complaint || null]
+            [patient_id, clinic_id]
         );
 
         res.status(201).json(rows[0]);
@@ -1307,8 +1307,8 @@ app.get('/api/visits/queue', authMiddleware, async (req, res) => {
 
     try {
         const { rows } = await db.query(
-            `SELECT v.visit_id, v.patient_id, v.visit_date, v.check_in_time, v.status,
-                    v.chief_complaint, v.doctor_id, v.alert_level,
+            `SELECT v.visit_id, v.patient_id, v.check_in_time, v.status,
+                    v.doctor_id, v.waiting_alert_level as alert_level,
                     p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
                     p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant,
                     di.full_name as doctor_name
@@ -1316,7 +1316,7 @@ app.get('/api/visits/queue', authMiddleware, async (req, res) => {
              JOIN patients p ON v.patient_id = p.patient_id
              LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
              WHERE v.clinic_id = $1 AND v.status = 'waiting'
-             ORDER BY v.alert_level DESC NULLS LAST, v.check_in_time ASC`,
+             ORDER BY v.waiting_alert_level DESC NULLS LAST, v.check_in_time ASC`,
             [clinic_id]
         );
         res.json(rows);
@@ -1336,14 +1336,14 @@ app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
 
     try {
         const { rows } = await db.query(
-            `SELECT v.visit_id, v.patient_id, v.visit_date, v.check_in_time, v.status,
-                    v.chief_complaint, v.alert_level,
+            `SELECT v.visit_id, v.patient_id, v.check_in_time, v.status,
+                    v.waiting_alert_level as alert_level,
                     p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
                     p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant
              FROM visits v
              JOIN patients p ON v.patient_id = p.patient_id
              WHERE v.clinic_id = $1 AND v.doctor_id = $2 AND v.status IN ('waiting', 'in_progress')
-             ORDER BY v.alert_level DESC NULLS LAST, v.check_in_time ASC`,
+             ORDER BY v.waiting_alert_level DESC NULLS LAST, v.check_in_time ASC`,
             [clinic_id, doctor_id]
         );
         res.json(rows);
@@ -1415,7 +1415,7 @@ app.put('/api/visits/:id/complete', authMiddleware, checkRole('doctor', 'admin')
     try {
         const { rows } = await db.query(
             `UPDATE visits
-             SET status = 'completed', checkout_time = NOW()
+             SET status = 'completed', check_out_time = NOW()
              WHERE visit_id = $1
              RETURNING *`,
             [id]
