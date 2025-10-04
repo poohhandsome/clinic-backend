@@ -1326,6 +1326,7 @@ app.get('/api/visits/queue', authMiddleware, async (req, res) => {
 });
 
 // GET queue for specific doctor (authenticated)
+// Uses appointments table since the existing system doesn't populate visits table
 app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
     const { doctor_id } = req.params;
     const { clinic_id } = req.query;
@@ -1335,15 +1336,18 @@ app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
     }
 
     try {
+        // Fetch checked-in appointments for this doctor
         const { rows } = await db.query(
-            `SELECT v.visit_id, v.patient_id, v.check_in_time, v.status,
-                    v.waiting_alert_level as alert_level,
+            `SELECT a.appointment_id as visit_id, a.patient_id, a.check_in_time,
+                    LOWER(a.status) as status, 0 as alert_level,
                     p.dn, p.first_name_th, p.last_name_th, p.date_of_birth,
                     p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant
-             FROM visits v
-             JOIN patients p ON v.patient_id = p.patient_id
-             WHERE v.clinic_id = $1 AND v.doctor_id = $2 AND v.status IN ('waiting', 'in_progress')
-             ORDER BY v.waiting_alert_level DESC NULLS LAST, v.check_in_time ASC`,
+             FROM appointments a
+             JOIN patients p ON a.patient_id = p.patient_id
+             WHERE a.clinic_id = $1 AND a.doctor_id = $2
+               AND LOWER(a.status) = 'checked-in'
+               AND DATE(a.appointment_time) = CURRENT_DATE
+             ORDER BY a.check_in_time ASC`,
             [clinic_id, doctor_id]
         );
         res.json(rows);
