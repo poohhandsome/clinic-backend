@@ -1889,16 +1889,11 @@ app.delete('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admi
 
 // POST add treatment to visit (doctor/nurse/admin)
 app.post('/api/visit-treatments', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
-    const { visit_id, treatment_id, quantity, custom_price } = req.body;
+    const { visit_id, treatment_id, quantity, custom_price, tooth_numbers, notes } = req.body;
 
     // Validation
-    if (!visit_id || !treatment_id || !quantity) {
-        return res.status(400).json({ message: 'Visit ID, treatment ID, and quantity are required' });
-    }
-
-    const qty = parseInt(quantity);
-    if (isNaN(qty) || qty <= 0) {
-        return res.status(400).json({ message: 'Quantity must be a positive number' });
+    if (!visit_id || !treatment_id) {
+        return res.status(400).json({ message: 'Visit ID and treatment ID are required' });
     }
 
     try {
@@ -1923,14 +1918,13 @@ app.post('/api/visit-treatments', authMiddleware, checkRole('doctor', 'nurse', '
         }
 
         const price = custom_price !== undefined ? parseFloat(custom_price) : treatmentCheck.rows[0].standard_price;
-        const total = price * qty;
 
         const { rows } = await db.query(
             `INSERT INTO visit_treatments
-             (visit_id, treatment_id, quantity, price, total_price)
+             (visit_id, treatment_id, actual_price, tooth_numbers, notes)
              VALUES ($1, $2, $3, $4, $5)
              RETURNING *`,
-            [visit_id, treatment_id, qty, price, total]
+            [visit_id, treatment_id, price, tooth_numbers || '', notes || '']
         );
 
         res.status(201).json(rows[0]);
@@ -1963,7 +1957,7 @@ app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res
 // PUT update visit treatment (doctor/nurse/admin)
 app.put('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
     const { id } = req.params;
-    const { quantity, custom_price, tooth_numbers, notes, location, clinical_findings, diagnosis } = req.body;
+    const { custom_price, tooth_numbers, notes } = req.body;
 
     try {
         // Get current visit treatment
@@ -1984,17 +1978,8 @@ app.put('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse'
         const values = [];
         let paramIndex = 1;
 
-        if (quantity !== undefined) {
-            const qty = parseInt(quantity);
-            if (isNaN(qty) || qty <= 0) {
-                return res.status(400).json({ message: 'Quantity must be a positive number' });
-            }
-            updates.push(`quantity = $${paramIndex++}`);
-            values.push(qty);
-        }
-
         if (custom_price !== undefined) {
-            updates.push(`price = $${paramIndex++}`);
+            updates.push(`actual_price = $${paramIndex++}`);
             values.push(parseFloat(custom_price));
         }
 
@@ -2006,21 +1991,6 @@ app.put('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse'
         if (notes !== undefined) {
             updates.push(`notes = $${paramIndex++}`);
             values.push(notes);
-        }
-
-        if (location !== undefined) {
-            updates.push(`location = $${paramIndex++}`);
-            values.push(location);
-        }
-
-        if (clinical_findings !== undefined) {
-            updates.push(`clinical_findings = $${paramIndex++}`);
-            values.push(clinical_findings);
-        }
-
-        if (diagnosis !== undefined) {
-            updates.push(`diagnosis = $${paramIndex++}`);
-            values.push(diagnosis);
         }
 
         if (updates.length === 0) {
