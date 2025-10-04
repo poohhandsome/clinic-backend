@@ -2323,26 +2323,42 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
     const { patient_id } = req.params;
 
     try {
-        // Get all appointments (visits) with exams, treatments, and bills
+        // THE FIX:
+        // 1. Changed `v.visit_date` to `DATE(v.check_in_time) as visit_date` to correctly get the date.
+        // 2. Changed `v.chief_complaint` to `ef.chief_complaint` to get it from the correct table.
         const { rows } = await db.query(
             `SELECT
-                a.appointment_id as visit_id, a.appointment_time as visit_date,
-                a.check_in_time, a.status, a.complaint as chief_complaint,
-                di.full_name as doctor_name, di.specialty,
-                ef.finding_id, ef.diagnosis, ef.vital_signs, ef.physical_exam,
-                tp.plan_id, tp.medications, tp.instructions, tp.follow_up_date,
-                b.billing_id, b.total_amount, b.payment_method, b.status as payment_status
-             FROM appointments a
-             LEFT JOIN doctors_identities di ON a.doctor_id = di.doctor_id
-             LEFT JOIN examination_findings ef ON a.appointment_id = ef.visit_id
+                v.visit_id, 
+                DATE(v.check_in_time) as visit_date, 
+                v.check_in_time, 
+                v.checkout_time, 
+                v.status,
+                ef.chief_complaint, -- Switched from v.chief_complaint
+                di.full_name as doctor_name, 
+                di.specialty,
+                ef.finding_id, 
+                ef.diagnosis, 
+                ef.vital_signs, 
+                ef.physical_exam,
+                tp.plan_id, 
+                tp.medications, 
+                tp.instructions, 
+                tp.follow_up_date,
+                b.billing_id, 
+                b.total_amount, 
+                b.payment_method, 
+                b.status as payment_status
+             FROM visits v
+             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             LEFT JOIN examination_findings ef ON v.visit_id = ef.visit_id
              LEFT JOIN treatment_plans tp ON ef.finding_id = tp.examination_id
-             LEFT JOIN billing b ON a.appointment_id = b.visit_id
-             WHERE a.patient_id = $1 AND a.status IN ('completed', 'checked-out')
-             ORDER BY a.appointment_time DESC, a.check_in_time DESC`,
+             LEFT JOIN billing b ON v.visit_id = b.visit_id
+             WHERE v.patient_id = $1
+             ORDER BY v.check_in_time DESC`,
             [patient_id]
         );
 
-        // Get all visit treatments for these visits
+        // This part of the logic remains the same and is correct
         const visitIds = rows.map(r => r.visit_id);
         let treatments = [];
 
@@ -2359,7 +2375,6 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
             treatments = treatmentsResult.rows;
         }
 
-        // Group treatments by visit
         const history = rows.map(visit => ({
             ...visit,
             treatments: treatments.filter(t => t.visit_id === visit.visit_id)
