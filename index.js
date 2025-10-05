@@ -1521,39 +1521,49 @@ app.put('/api/visits/:id/complete', authMiddleware, checkRole('doctor', 'admin')
 });
 
 // PUT checkout visit with password verification (doctor only)
-app.put('/api/visits/:id/checkout', authMiddleware, checkRole('doctor'), async (req, res) => {
+app.put('/api/visits/:id/checkout', authMiddleware, async (req, res) => {
     const id = parseInt(req.params.id);
-    const { password, status } = req.body;
-
-    if (!password) {
-        return res.status(400).json({ message: 'Password is required' });
-    }
+    const { password, status, payment_method, amount_paid, transaction_ref } = req.body;
+    const userRole = req.user.role;
 
     if (!status || !['draft_checkout', 'completed'].includes(status)) {
         return res.status(400).json({ message: 'Invalid status. Must be draft_checkout or completed' });
     }
 
     try {
-        // Verify doctor's password
-        const doctorId = parseInt(req.user.id);
-        const doctorCheck = await db.query(
-            'SELECT password_hash FROM doctors_identities WHERE doctor_id = $1',
-            [doctorId]
-        );
+        // For doctors: require password verification for draft_checkout
+        if (userRole === 'doctor' && status === 'draft_checkout') {
+            if (!password) {
+                return res.status(400).json({ message: 'Password is required' });
+            }
 
-        if (doctorCheck.rows.length === 0) {
-            return res.status(404).json({ message: 'Doctor not found' });
+            const doctorId = parseInt(req.user.id);
+            const doctorCheck = await db.query(
+                'SELECT password_hash FROM doctors_identities WHERE doctor_id = $1',
+                [doctorId]
+            );
+
+            if (doctorCheck.rows.length === 0) {
+                return res.status(404).json({ message: 'Doctor not found' });
+            }
+
+            const passwordMatch = await bcrypt.compare(password, doctorCheck.rows[0].password_hash);
+
+            if (!passwordMatch) {
+                return res.status(401).json({ message: 'Incorrect password' });
+            }
         }
 
-        const passwordMatch = await bcrypt.compare(password, doctorCheck.rows[0].password_hash);
-
-        if (!passwordMatch) {
-            return res.status(401).json({ message: 'Incorrect password' });
+        // For nurses/admins completing payment: require payment details
+        if (['nurse', 'admin'].includes(userRole) && status === 'completed') {
+            if (!payment_method) {
+                return res.status(400).json({ message: 'Payment method is required' });
+            }
         }
 
-        // Update visit status (using visits table)
+        // Update visit status
         const visitId = parseInt(id);
-        const { rows } = await db.query(
+        const { rows: visitRows } = await db.query(
             `UPDATE visits
              SET status = $1::text, check_out_time = CASE WHEN $1::text = 'completed' THEN NOW() ELSE check_out_time END
              WHERE visit_id = $2::integer
@@ -1561,11 +1571,51 @@ app.put('/api/visits/:id/checkout', authMiddleware, checkRole('doctor'), async (
             [status, visitId]
         );
 
-        if (rows.length === 0) {
+        if (visitRows.length === 0) {
             return res.status(404).json({ message: 'Visit not found' });
         }
 
-        res.json(rows[0]);
+        // If completing payment, update or create billing record
+        if (status === 'completed' && payment_method) {
+            // Calculate total from visit treatments
+            const totalCalc = await db.query(
+                `SELECT COALESCE(SUM(actual_price), 0) as total
+                 FROM visit_treatments
+                 WHERE visit_id = $1`,
+                [visitId]
+            );
+            const totalAmount = parseFloat(totalCalc.rows[0].total);
+
+            // Check if billing record exists
+            const billingCheck = await db.query(
+                'SELECT billing_id FROM billing WHERE visit_id = $1',
+                [visitId]
+            );
+
+            if (billingCheck.rows.length > 0) {
+                // Update existing billing record
+                await db.query(
+                    `UPDATE billing
+                     SET payment_status = 'paid',
+                         payment_method = $1,
+                         amount_paid = $2,
+                         transaction_ref = $3,
+                         paid_at = NOW(),
+                         processed_by = $4
+                     WHERE visit_id = $5`,
+                    [payment_method, amount_paid || totalAmount, transaction_ref, req.user.id, visitId]
+                );
+            } else {
+                // Create new billing record
+                await db.query(
+                    `INSERT INTO billing (visit_id, total_amount, payment_status, payment_method, amount_paid, transaction_ref, paid_at, processed_by)
+                     VALUES ($1, $2, 'paid', $3, $4, $5, NOW(), $6)`,
+                    [visitId, totalAmount, payment_method, amount_paid || totalAmount, transaction_ref, req.user.id]
+                );
+            }
+        }
+
+        res.json(visitRows[0]);
     } catch (err) {
         handleError(res, err, 'Failed to checkout visit');
     }
