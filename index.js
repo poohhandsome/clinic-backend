@@ -1535,9 +1535,10 @@ app.put('/api/visits/:id/checkout', authMiddleware, checkRole('doctor'), async (
 
     try {
         // Verify doctor's password
+        const doctorId = parseInt(req.user.id);
         const doctorCheck = await db.query(
             'SELECT password_hash FROM doctors_identities WHERE doctor_id = $1',
-            [req.user.id]
+            [doctorId]
         );
 
         if (doctorCheck.rows.length === 0) {
@@ -1551,12 +1552,13 @@ app.put('/api/visits/:id/checkout', authMiddleware, checkRole('doctor'), async (
         }
 
         // Update visit status (using visits table)
+        const visitId = parseInt(id);
         const { rows } = await db.query(
             `UPDATE visits
-             SET status = $1, check_out_time = CASE WHEN $1 = 'completed' THEN NOW() ELSE check_out_time END
-             WHERE visit_id = $2
+             SET status = $1::text, check_out_time = CASE WHEN $1::text = 'completed' THEN NOW() ELSE check_out_time END
+             WHERE visit_id = $2::integer
              RETURNING *`,
-            [status, id]
+            [status, visitId]
         );
 
         if (rows.length === 0) {
