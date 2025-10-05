@@ -2026,6 +2026,34 @@ app.get('/api/visit-treatments/:id', authMiddleware, async (req, res) => {
     }
 });
 
+// POST save treatment record for a treatment plan
+app.post('/api/treatment-plans/record', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
+    const { plan_id, treatment_record, recorded_at } = req.body;
+
+    if (!plan_id || !treatment_record) {
+        return res.status(400).json({ message: 'Plan ID and treatment record are required' });
+    }
+
+    try {
+        // Update the treatment plan with the record
+        const { rows } = await db.query(
+            `UPDATE treatment_plans
+             SET notes = COALESCE(notes || E'\\n\\n--- Record ' || $2::text || E' ---\\n', '') || $3
+             WHERE plan_id = $1
+             RETURNING *`,
+            [plan_id, recorded_at || new Date().toISOString(), treatment_record]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Treatment plan not found' });
+        }
+
+        res.json({ success: true, data: rows[0] });
+    } catch (err) {
+        handleError(res, err, 'Failed to save treatment record');
+    }
+});
+
 // =====================================================================
 // GROUP 6: BILLING API
 // =====================================================================
@@ -2059,9 +2087,11 @@ app.post('/api/billing/generate/:visit_id', authMiddleware, checkRole('nurse', '
             });
         }
 
-        // Calculate total from visit_treatments
+        // Calculate total from visit_treatments (only completed treatments)
         const totalCalc = await db.query(
-            'SELECT COALESCE(SUM(actual_price), 0) as total FROM visit_treatments WHERE visit_id = $1',
+            `SELECT COALESCE(SUM(actual_price), 0) as total
+             FROM visit_treatments
+             WHERE visit_id = $1 AND (status = 'completed' OR status IS NULL)`,
             [visit_id]
         );
 
