@@ -29,9 +29,25 @@ app.use(helmet({
     crossOriginEmbedderPolicy: false, // Allow embedding if needed
 }));
 
-// Configure CORS to only allow requests from your frontend domain
+// Configure CORS to allow requests from your frontend domains
+const allowedOrigins = [
+    'http://localhost:5173',
+    'https://dashboard.newtrenddental.com',
+    process.env.FRONTEND_URL
+].filter(Boolean);
+
 const corsOptions = {
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+
+        if (allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            console.log('Blocked by CORS:', origin);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     credentials: true,
     optionsSuccessStatus: 200,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
@@ -1335,6 +1351,44 @@ app.post('/api/visits/check-in', authMiddleware, checkRole('nurse', 'admin'), as
         res.status(201).json(rows[0]);
     } catch (err) {
         handleError(res, err, 'Failed to check in patient');
+    }
+});
+
+// GET visits with optional status filter (for Counter page)
+app.get('/api/visits', authMiddleware, async (req, res) => {
+    const { clinic_id, status } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        let query = `
+            SELECT v.visit_id, v.patient_id, v.check_in_time, v.check_out_time, v.status,
+                   v.doctor_id, v.waiting_alert_level as alert_level,
+                   p.dn, p.first_name_th, p.last_name_th, p.first_name_en, p.last_name_en,
+                   p.date_of_birth, p.chronic_diseases, p.allergies, p.extreme_care_drugs, p.is_pregnant,
+                   di.full_name as doctor_name,
+                   b.payment_status
+            FROM visits v
+            JOIN patients p ON v.patient_id = p.patient_id
+            LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+            LEFT JOIN billing b ON v.visit_id = b.visit_id
+            WHERE v.clinic_id = $1`;
+
+        const params = [clinic_id];
+
+        if (status) {
+            query += ` AND v.status = $2`;
+            params.push(status);
+        }
+
+        query += ` ORDER BY v.check_in_time DESC`;
+
+        const { rows } = await db.query(query, params);
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch visits');
     }
 });
 
