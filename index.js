@@ -2031,6 +2031,31 @@ app.post('/api/visit-treatments', authMiddleware, checkRole('doctor', 'nurse', '
 });
 
 // GET all treatments for a visit (authenticated)
+// GET treatments for a visit - RESTful alias (for Counter page)
+app.get('/api/visits/:id/treatments', authMiddleware, async (req, res) => {
+    const visit_id = parseInt(req.params.id);
+
+    try {
+        const { rows } = await db.query(
+            `SELECT vt.*,
+                    t.code, t.name, t.category, t.standard_price,
+                    v.doctor_id,
+                    di.full_name as doctor_name
+             FROM visit_treatments vt
+             JOIN treatments t ON vt.treatment_id = t.treatment_id
+             JOIN visits v ON vt.visit_id = v.visit_id
+             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             WHERE vt.visit_id = $1
+             ORDER BY vt.visit_treatment_id`,
+            [visit_id]
+        );
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch visit treatments');
+    }
+});
+
+// GET treatments for a visit - Legacy endpoint (for backwards compatibility)
 app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res) => {
     const visit_id = parseInt(req.params.visit_id);
 
