@@ -1788,6 +1788,27 @@ app.get('/api/treatment-plans/visit/:visit_id', authMiddleware, async (req, res)
     }
 });
 
+// GET treatment plans for a patient (authenticated)
+app.get('/api/treatment-plans/patient/:patient_id', authMiddleware, async (req, res) => {
+    const patient_id = parseInt(req.params.patient_id);
+
+    try {
+        const { rows } = await db.query(
+            `SELECT tp.*,
+                    di.full_name as doctor_name
+             FROM treatment_plans tp
+             LEFT JOIN doctors_identities di ON tp.doctor_id = di.doctor_id
+             WHERE tp.patient_id = $1
+             ORDER BY tp.plan_date DESC, tp.created_at DESC`,
+            [patient_id]
+        );
+
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch treatment plans for patient');
+    }
+});
+
 // PUT update treatment plan (doctor/admin only)
 app.put('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
     const id = parseInt(req.params.id);
@@ -2087,11 +2108,11 @@ app.post('/api/billing/generate/:visit_id', authMiddleware, checkRole('nurse', '
             });
         }
 
-        // Calculate total from visit_treatments (only completed treatments)
+        // Calculate total from visit_treatments (all treatments - doctor can bill anytime)
         const totalCalc = await db.query(
             `SELECT COALESCE(SUM(actual_price), 0) as total
              FROM visit_treatments
-             WHERE visit_id = $1 AND (status = 'completed' OR status IS NULL)`,
+             WHERE visit_id = $1`,
             [visit_id]
         );
 
