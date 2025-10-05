@@ -2778,6 +2778,237 @@ app.get('/api/reports/daily-summary', authMiddleware, checkRole('admin'), async 
     }
 });
 
+// =====================================================================
+// OPERATIONS DASHBOARD API ENDPOINTS
+// =====================================================================
+
+// GET KPI data for operations dashboard
+app.get('/api/operations/kpi', authMiddleware, async (req, res) => {
+    const { clinic_id, start_date, end_date } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        // Total patients
+        const patientsQuery = `
+            SELECT COUNT(*) as total_patients
+            FROM visits
+            WHERE clinic_id = $1
+            AND DATE(check_in_time) BETWEEN $2 AND $3
+        `;
+
+        // Total revenue
+        const revenueQuery = `
+            SELECT COALESCE(SUM(b.total_amount), 0) as total_revenue
+            FROM billing b
+            JOIN visits v ON b.visit_id = v.visit_id
+            WHERE v.clinic_id = $1
+            AND b.payment_status = 'paid'
+            AND DATE(v.check_in_time) BETWEEN $2 AND $3
+        `;
+
+        // Average wait time (in minutes)
+        const waitTimeQuery = `
+            SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (check_out_time - check_in_time)) / 60), 0) as avg_wait_time
+            FROM visits
+            WHERE clinic_id = $1
+            AND check_out_time IS NOT NULL
+            AND DATE(check_in_time) BETWEEN $2 AND $3
+        `;
+
+        // Status counts
+        const statusQuery = `
+            SELECT status, COUNT(*) as count
+            FROM visits
+            WHERE clinic_id = $1
+            AND DATE(check_in_time) BETWEEN $2 AND $3
+            GROUP BY status
+        `;
+
+        const [patientsResult, revenueResult, waitTimeResult, statusResult] = await Promise.all([
+            db.query(patientsQuery, [clinic_id, start_date, end_date]),
+            db.query(revenueQuery, [clinic_id, start_date, end_date]),
+            db.query(waitTimeQuery, [clinic_id, start_date, end_date]),
+            db.query(statusQuery, [clinic_id, start_date, end_date])
+        ]);
+
+        const statusCounts = {};
+        statusResult.rows.forEach(row => {
+            statusCounts[row.status] = parseInt(row.count);
+        });
+
+        res.json({
+            totalPatients: parseInt(patientsResult.rows[0].total_patients),
+            totalRevenue: parseFloat(revenueResult.rows[0].total_revenue),
+            averageWaitTime: Math.round(parseFloat(waitTimeResult.rows[0].avg_wait_time)),
+            statusCounts
+        });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch KPI data');
+    }
+});
+
+// GET patient log for operations dashboard
+app.get('/api/operations/patient-log', authMiddleware, async (req, res) => {
+    const { clinic_id, start_date, end_date } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        const query = `
+            SELECT
+                v.visit_id,
+                v.patient_id,
+                v.check_in_time,
+                v.check_out_time,
+                v.status,
+                v.created_at as status_changed_at,
+                p.dn,
+                p.first_name_th,
+                p.last_name_th,
+                p.first_name_en,
+                p.last_name_en,
+                p.mobile_phone,
+                di.full_name as doctor_name,
+                COALESCE(b.total_amount, 0) as total_amount,
+                b.payment_status,
+                b.payment_method,
+                b.amount_paid
+            FROM visits v
+            JOIN patients p ON v.patient_id = p.patient_id
+            LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+            LEFT JOIN billing b ON v.visit_id = b.visit_id
+            WHERE v.clinic_id = $1
+            AND DATE(v.check_in_time) BETWEEN $2 AND $3
+            ORDER BY v.check_in_time DESC
+        `;
+
+        const { rows } = await db.query(query, [clinic_id, start_date, end_date]);
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch patient log');
+    }
+});
+
+// GET export reports (placeholder - will generate files)
+app.get('/api/operations/export', authMiddleware, async (req, res) => {
+    const { clinic_id, start_date, end_date, format, type } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        // For now, return CSV format for all types
+        let data = '';
+        let filename = '';
+
+        if (type === 'patient-log') {
+            const query = `
+                SELECT
+                    p.dn as "Patient ID",
+                    CONCAT(p.first_name_th, ' ', p.last_name_th) as "Patient Name",
+                    TO_CHAR(v.check_in_time, 'YYYY-MM-DD HH24:MI') as "Check-in Time",
+                    di.full_name as "Doctor",
+                    v.status as "Status",
+                    COALESCE(b.total_amount, 0) as "Total Amount",
+                    b.payment_status as "Payment Status"
+                FROM visits v
+                JOIN patients p ON v.patient_id = p.patient_id
+                LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+                LEFT JOIN billing b ON v.visit_id = b.visit_id
+                WHERE v.clinic_id = $1
+                AND DATE(v.check_in_time) BETWEEN $2 AND $3
+                ORDER BY v.check_in_time DESC
+            `;
+
+            const { rows } = await db.query(query, [clinic_id, start_date, end_date]);
+
+            if (rows.length > 0) {
+                // CSV headers
+                const headers = Object.keys(rows[0]).join(',');
+                // CSV data
+                const csvRows = rows.map(row =>
+                    Object.values(row).map(val => `"${val || ''}"`).join(',')
+                );
+                data = [headers, ...csvRows].join('\n');
+            } else {
+                data = 'No data available';
+            }
+
+            filename = `patient-log-${start_date}-${end_date}.csv`;
+        } else if (type === 'daily-income') {
+            const query = `
+                SELECT
+                    DATE(v.check_in_time) as "Date",
+                    b.payment_method as "Payment Method",
+                    COUNT(*) as "Transaction Count",
+                    SUM(b.total_amount) as "Total Amount"
+                FROM billing b
+                JOIN visits v ON b.visit_id = v.visit_id
+                WHERE v.clinic_id = $1
+                AND b.payment_status = 'paid'
+                AND DATE(v.check_in_time) BETWEEN $2 AND $3
+                GROUP BY DATE(v.check_in_time), b.payment_method
+                ORDER BY DATE(v.check_in_time) DESC
+            `;
+
+            const { rows } = await db.query(query, [clinic_id, start_date, end_date]);
+
+            if (rows.length > 0) {
+                const headers = Object.keys(rows[0]).join(',');
+                const csvRows = rows.map(row =>
+                    Object.values(row).map(val => `"${val || ''}"`).join(',')
+                );
+                data = [headers, ...csvRows].join('\n');
+            } else {
+                data = 'No data available';
+            }
+
+            filename = `daily-income-${start_date}-${end_date}.csv`;
+        } else if (type === 'service-report') {
+            const query = `
+                SELECT
+                    t.code as "Treatment Code",
+                    t.name as "Treatment Name",
+                    COUNT(*) as "Times Performed",
+                    SUM(vt.actual_price) as "Total Revenue"
+                FROM visit_treatments vt
+                JOIN treatments t ON vt.treatment_id = t.treatment_id
+                JOIN visits v ON vt.visit_id = v.visit_id
+                WHERE v.clinic_id = $1
+                AND DATE(v.check_in_time) BETWEEN $2 AND $3
+                GROUP BY t.code, t.name
+                ORDER BY COUNT(*) DESC
+            `;
+
+            const { rows } = await db.query(query, [clinic_id, start_date, end_date]);
+
+            if (rows.length > 0) {
+                const headers = Object.keys(rows[0]).join(',');
+                const csvRows = rows.map(row =>
+                    Object.values(row).map(val => `"${val || ''}"`).join(',')
+                );
+                data = [headers, ...csvRows].join('\n');
+            } else {
+                data = 'No data available';
+            }
+
+            filename = `service-report-${start_date}-${end_date}.csv`;
+        }
+
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(data);
+    } catch (err) {
+        handleError(res, err, 'Failed to export report');
+    }
+});
+
 app.listen(port, () => {
     console.log(`✅ Server started on port ${port}`);
 });
