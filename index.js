@@ -1107,7 +1107,7 @@ app.post('/api/patients/:patientId/documents', authMiddleware, async (req, res) 
 
 
 // --- Health Check Endpoint ---
-app.get('/health', async (req, res) => {
+app.get('/api/health', async (req, res) => {
     try {
         // Check database connection
         await db.query('SELECT 1');
