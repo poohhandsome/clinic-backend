@@ -286,7 +286,7 @@ app.post('/api/doctors', authMiddleware, checkRole('nurse', 'admin'), async (req
 });
 
 app.put('/api/doctors/:id', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
     const { clinicIds, specialty, email, color, status, password } = req.body;
     if (!Array.isArray(clinicIds)) {
         return res.status(400).json({ message: 'clinicIds must be an array.' });
@@ -495,7 +495,7 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
 
 app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res) => {
     try {
-        const { doctor_id } = req.params;
+        const doctor_id = parseInt(req.params.doctor_id);
 
         const { rows: doctorRecords } = await db.query(
             `SELECT dca.clinic_id, c.name as clinic_name FROM doctor_clinic_assignments dca 
@@ -552,7 +552,7 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
 
 
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
-    const { doctor_id } = req.params;
+    const doctor_id = parseInt(req.params.doctor_id);
     try {
         const { rows } = await db.query(
             `SELECT da.id, da.day_of_week, da.start_time, da.end_time, da.clinic_id, c.name as clinic_name
@@ -570,7 +570,7 @@ app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) 
 
 
 app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
-    const { doctor_id } = req.params;
+    const doctor_id = parseInt(req.params.doctor_id);
     const { availability } = req.body; // Expects an array with a single schedule object
     const slot = availability[0];
     try {
@@ -587,7 +587,7 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
 
 
 app.get('/api/doctor-rules/:doctor_id', authMiddleware, async(req, res) => {
-    const { doctor_id } = req.params;
+    const doctor_id = parseInt(req.params.doctor_id);
      try {
         const { rows } = await db.query(
             `SELECT r.id, r.day_of_week, r.weeks_of_month, r.start_time, r.end_time, r.clinic_id, c.name as clinic_name
@@ -604,7 +604,7 @@ app.get('/api/doctor-rules/:doctor_id', authMiddleware, async(req, res) => {
 });
 
 app.post('/api/doctor-rules/:doctor_id', authMiddleware, async(req, res) => {
-    const { doctor_id } = req.params;
+    const doctor_id = parseInt(req.params.doctor_id);
     const { clinic_id, day_of_week, weeks_of_month, start_time, end_time } = req.body;
     try {
         await db.query(
@@ -619,7 +619,7 @@ app.post('/api/doctor-rules/:doctor_id', authMiddleware, async(req, res) => {
 });
 
 app.delete('/api/doctor-rules/:rule_id', authMiddleware, async(req, res) => {
-    const { rule_id } = req.params;
+    const rule_id = parseInt(req.params.rule_id);
     try {
         await db.query('DELETE FROM doctor_availability_rules WHERE id = $1', [rule_id]);
         res.status(200).json({ message: 'Rule deleted successfully.' });
@@ -695,7 +695,7 @@ app.get('/api/all-appointments', authMiddleware, async (req, res) => {
 // ***************************************************************
 
 app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
     const { status, doctor_id, appointment_date, appointment_time, purpose, room_id, confirmation_notes } = req.body;
 
     // Use a database transaction to ensure data integrity
@@ -908,38 +908,8 @@ app.post('/api/appointments', authMiddleware, checkRole('nurse', 'doctor', 'admi
     }
 });
 
-app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
-    const { id } = req.params;
-    const { status, doctor_id, appointment_date, appointment_time, purpose, room_id, confirmation_notes } = req.body;
-    try {
-        const fields = [];
-        const values = [];
-        let query = 'UPDATE appointments SET ';
-        if (status) { fields.push('status = $' + (fields.length + 1)); values.push(status); }
-        if (doctor_id && appointment_date && appointment_time) {
-            const appointmentTimestamp = `${appointment_date} ${appointment_time}`;
-            fields.push('doctor_id = $' + (fields.length + 1)); values.push(doctor_id);
-            fields.push('appointment_time = $' + (fields.length + 1)); values.push(appointmentTimestamp);
-        }
-        if (purpose) { fields.push('purpose = $' + (fields.length + 1)); values.push(purpose); }
-        if (room_id) { fields.push('room_id = $' + (fields.length + 1)); values.push(room_id); }
-        if (confirmation_notes) { fields.push('confirmation_notes = $' + (fields.length + 1)); values.push(confirmation_notes); }
-        if (fields.length === 0) return res.status(400).json({ message: 'No valid fields provided for update.' });
-        query += fields.join(', ');
-        query += ' WHERE appointment_id = $' + (fields.length + 1) + ' RETURNING *';
-        values.push(id);
-        const { rows } = await db.query(query, values);
-        res.json(rows[0]);
-    } catch (err) {
-        console.error("Error in PATCH /api/appointments/:id:", err.message);
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-
-
 app.get('/api/special-schedules/:doctor_id', authMiddleware, async (req, res) => {
-    const { doctor_id } = req.params;
+    const doctor_id = parseInt(req.params.doctor_id);
     try {
         const query = `
             SELECT ss.id, ss.doctor_id, ss.clinic_id, c.name as clinic_name,
@@ -976,7 +946,7 @@ app.post('/api/special-schedules', authMiddleware, async (req, res) => {
 
 
 app.delete('/api/special-schedules/:id', authMiddleware, async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
     try {
         await db.query('DELETE FROM special_schedules WHERE id = $1', [id]);
         res.status(200).json({ message: 'Special schedule deleted successfully.' });
@@ -989,7 +959,7 @@ app.delete('/api/special-schedules/:id', authMiddleware, async (req, res) => {
 
 // --- NEW Treatment Plan Endpoints ---
 app.get('/api/patients/:patientId', authMiddleware, async (req, res) => {
-    const { patientId } = req.params;
+    const patientId = parseInt(req.params.patientId);
     try {
         const { rows } = await db.query(
             'SELECT * FROM patients WHERE patient_id = $1',
@@ -1006,7 +976,7 @@ app.get('/api/patients/:patientId', authMiddleware, async (req, res) => {
 });
 // GET a patient's entire treatment history (plans, items, exams, documents)
 app.get('/api/patients/:patientId/treatment-history', authMiddleware, async (req, res) => {
-    const { patientId } = req.params;
+    const patientId = parseInt(req.params.patientId);
     try {
         const plans = await db.query('SELECT * FROM treatment_plans WHERE patient_id = $1 ORDER BY plan_date DESC', [patientId]);
         const items = await db.query('SELECT ti.* FROM treatment_items ti JOIN treatment_plans tp ON ti.plan_id = tp.plan_id WHERE tp.patient_id = $1', [patientId]);
@@ -1068,7 +1038,7 @@ app.post('/api/treatment-plans', authMiddleware, async (req, res) => {
 
 // PUT to update a treatment item's status or progress
 app.put('/api/treatment-items/:itemId', authMiddleware, async (req, res) => {
-    const { itemId } = req.params;
+    const itemId = parseInt(req.params.itemId);
     const { status, progress } = req.body;
     try {
         const updatedItem = await db.query(
@@ -1081,7 +1051,7 @@ app.put('/api/treatment-items/:itemId', authMiddleware, async (req, res) => {
     }
 });
 app.put('/api/patients/:patientId', authMiddleware, async (req, res) => {
-    const { patientId } = req.params;
+    const patientId = parseInt(req.params.patientId);
     const {
         dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th,
         title_en, first_name_en, last_name_en, nickname, gender, date_of_birth,
@@ -1122,7 +1092,7 @@ app.put('/api/patients/:patientId', authMiddleware, async (req, res) => {
 // POST to upload a document (this would involve file handling middleware like multer)
 app.post('/api/patients/:patientId/documents', authMiddleware, async (req, res) => {
     // This is a simplified example. You'd use a library like 'multer' to handle the file upload.
-    const { patientId } = req.params;
+    const patientId = parseInt(req.params.patientId);
     const { file_name, file_url, document_type } = req.body; // In reality, you'd get this info after uploading to cloud storage
     try {
         const newDoc = await db.query(
@@ -1240,7 +1210,7 @@ app.post('/api/treatments', authMiddleware, checkRole('nurse', 'admin'), async (
 
 // PUT update treatment (nurse/admin only)
 app.put('/api/treatments/:id', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
     const { code, name, standard_price, category, description } = req.body;
 
     // Validation
@@ -1277,7 +1247,7 @@ app.put('/api/treatments/:id', authMiddleware, checkRole('nurse', 'admin'), asyn
 
 // DELETE treatment (admin only)
 app.delete('/api/treatments/:id', authMiddleware, checkRole('admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
 
     try {
         const { rows } = await db.query(
@@ -1399,7 +1369,7 @@ app.get('/api/visits/queue', authMiddleware, async (req, res) => {
 // GET queue for specific doctor (authenticated) - Supports status filtering
 // Queries visits table (primary) with fallback to appointments table
 app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
-    const { doctor_id } = req.params;
+    const doctor_id = parseInt(req.params.doctor_id);
     const { clinic_id, status } = req.query;
 
     console.log('=== DOCTOR QUEUE ENDPOINT CALLED ===');
@@ -1473,7 +1443,7 @@ app.get('/api/visits/queue/:doctor_id', authMiddleware, async (req, res) => {
 
 // PUT assign doctor to visit (nurse/admin only)
 app.put('/api/visits/:id/assign-doctor', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
     const { doctor_id } = req.body;
 
     if (!doctor_id) {
@@ -1501,7 +1471,7 @@ app.put('/api/visits/:id/assign-doctor', authMiddleware, checkRole('nurse', 'adm
 
 // GET visit details (authenticated)
 app.get('/api/visits/:id', authMiddleware, async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
 
     try {
         const { rows } = await db.query(
@@ -1529,7 +1499,7 @@ app.get('/api/visits/:id', authMiddleware, async (req, res) => {
 
 // PUT complete visit (doctor/admin only)
 app.put('/api/visits/:id/complete', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
 
     try {
         const { rows } = await db.query(
@@ -1552,7 +1522,7 @@ app.put('/api/visits/:id/complete', authMiddleware, checkRole('doctor', 'admin')
 
 // PUT checkout visit with password verification (doctor only)
 app.put('/api/visits/:id/checkout', authMiddleware, checkRole('doctor'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
     const { password, status } = req.body;
 
     if (!password) {
@@ -1651,7 +1621,7 @@ app.post('/api/examinations', authMiddleware, checkRole('doctor', 'admin'), asyn
 
 // GET examination by visit (authenticated)
 app.get('/api/examinations/visit/:visit_id', authMiddleware, async (req, res) => {
-    const { visit_id } = req.params;
+    const visit_id = parseInt(req.params.visit_id);
 
     try {
         const { rows } = await db.query(
@@ -1679,7 +1649,7 @@ app.get('/api/examinations/visit/:visit_id', authMiddleware, async (req, res) =>
 
 // PUT update examination (doctor/admin only)
 app.put('/api/examinations/:id', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
     const { chief_complaint, clinical_findings, principal_diagnosis, present_illness, past_medical_history, location } = req.body;
 
     try {
@@ -1722,12 +1692,12 @@ app.put('/api/examinations/:id', authMiddleware, checkRole('doctor', 'admin'), a
 
 // GET single examination (authenticated)
 app.get('/api/examinations/:id', authMiddleware, async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
 
     try {
         const { rows } = await db.query(
             `SELECT ef.*,
-                    v.patient_id, v.visit_date,
+                    v.patient_id, DATE(v.check_in_time) as visit_date,
                     p.dn, p.first_name_th, p.last_name_th,
                     di.full_name as doctor_name
              FROM examination_findings ef
@@ -1794,7 +1764,7 @@ app.post('/api/treatment-plans', authMiddleware, checkRole('doctor', 'admin'), a
 
 // GET treatment plan by visit (authenticated)
 app.get('/api/treatment-plans/visit/:visit_id', authMiddleware, async (req, res) => {
-    const { visit_id } = req.params;
+    const visit_id = parseInt(req.params.visit_id);
 
     try {
         const { rows } = await db.query(
@@ -1820,7 +1790,7 @@ app.get('/api/treatment-plans/visit/:visit_id', authMiddleware, async (req, res)
 
 // PUT update treatment plan (doctor/admin only)
 app.put('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
     const { status, notes } = req.body;
 
     try {
@@ -1858,7 +1828,7 @@ app.put('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admin')
 
 // DELETE treatment plan (doctor/admin only)
 app.delete('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
 
     try {
         // Check ownership
@@ -1935,7 +1905,7 @@ app.post('/api/visit-treatments', authMiddleware, checkRole('doctor', 'nurse', '
 
 // GET all treatments for a visit (authenticated)
 app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res) => {
-    const { visit_id } = req.params;
+    const visit_id = parseInt(req.params.visit_id);
 
     try {
         // THE FIX: Changed ORDER BY from "vt.created_at" to "vt.visit_treatment_id"
@@ -1956,7 +1926,7 @@ app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res
 
 // PUT update visit treatment (doctor/nurse/admin)
 app.put('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
     const { custom_price, tooth_numbers, notes } = req.body;
 
     try {
@@ -2014,7 +1984,7 @@ app.put('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse'
 
 // DELETE visit treatment (doctor/nurse/admin)
 app.delete('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
 
     try {
         const { rows } = await db.query(
@@ -2034,7 +2004,7 @@ app.delete('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nur
 
 // GET single visit treatment (authenticated)
 app.get('/api/visit-treatments/:id', authMiddleware, async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
 
     try {
         const { rows } = await db.query(
@@ -2062,7 +2032,7 @@ app.get('/api/visit-treatments/:id', authMiddleware, async (req, res) => {
 
 // POST generate bill for a visit (nurse/admin only)
 app.post('/api/billing/generate/:visit_id', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
-    const { visit_id } = req.params;
+    const visit_id = parseInt(req.params.visit_id);
     const { discount, notes } = req.body;
 
     try {
@@ -2091,7 +2061,7 @@ app.post('/api/billing/generate/:visit_id', authMiddleware, checkRole('nurse', '
 
         // Calculate total from visit_treatments
         const totalCalc = await db.query(
-            'SELECT COALESCE(SUM(total_price), 0) as total FROM visit_treatments WHERE visit_id = $1',
+            'SELECT COALESCE(SUM(actual_price), 0) as total FROM visit_treatments WHERE visit_id = $1',
             [visit_id]
         );
 
@@ -2119,12 +2089,12 @@ app.post('/api/billing/generate/:visit_id', authMiddleware, checkRole('nurse', '
 
 // GET bill details (authenticated)
 app.get('/api/billing/:id', authMiddleware, async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
 
     try {
         const { rows } = await db.query(
             `SELECT b.*,
-                    v.visit_date, v.check_in_time, v.checkout_time,
+                    DATE(v.check_in_time) as visit_date, v.check_in_time, v.check_out_time as checkout_time,
                     p.dn, p.first_name_th, p.last_name_th, p.mobile_phone,
                     di.full_name as doctor_name
              FROM billing b
@@ -2159,7 +2129,7 @@ app.get('/api/billing/:id', authMiddleware, async (req, res) => {
 
 // GET bill by visit (authenticated)
 app.get('/api/billing/visit/:visit_id', authMiddleware, async (req, res) => {
-    const { visit_id } = req.params;
+    const visit_id = parseInt(req.params.visit_id);
 
     try {
         const { rows } = await db.query(
@@ -2183,7 +2153,7 @@ app.get('/api/billing/visit/:visit_id', authMiddleware, async (req, res) => {
 
 // PUT record payment (nurse/admin only)
 app.put('/api/billing/:id/payment', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
-    const { id } = req.params;
+    const id = parseInt(req.params.id);
     const { payment_method, paid_amount } = req.body;
 
     // Validation
@@ -2253,7 +2223,7 @@ app.get('/api/billing/pending', authMiddleware, checkRole('nurse', 'admin'), asy
     try {
         const { rows } = await db.query(
             `SELECT b.billing_id, b.total_amount, b.created_at,
-                    v.visit_date, v.visit_id,
+                    DATE(v.check_in_time) as visit_date, v.visit_id,
                     p.dn, p.first_name_th, p.last_name_th
              FROM billing b
              JOIN visits v ON b.visit_id = v.visit_id
@@ -2284,7 +2254,7 @@ app.get('/api/billing/history', authMiddleware, checkRole('admin'), async (req, 
     try {
         let query = `
             SELECT b.*,
-                   v.visit_date,
+                   DATE(v.check_in_time) as visit_date,
                    p.dn, p.first_name_th, p.last_name_th
             FROM billing b
             JOIN visits v ON b.visit_id = v.visit_id
@@ -2350,7 +2320,7 @@ app.get('/api/billing/history', authMiddleware, checkRole('admin'), async (req, 
 
 // GET complete patient history (authenticated)
 app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => {
-    const { patient_id } = req.params;
+    const patient_id = parseInt(req.params.patient_id);
 
     try {
         // Get all completed visits with examination findings and billing
@@ -2418,7 +2388,7 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
 
 // GET visit details for PDF generation (authenticated)
 app.get('/api/history/visit/:visit_id/pdf', authMiddleware, async (req, res) => {
-    const { visit_id } = req.params;
+    const visit_id = parseInt(req.params.visit_id);
 
     try {
         // Get complete visit information
@@ -2457,7 +2427,7 @@ app.get('/api/history/visit/:visit_id/pdf', authMiddleware, async (req, res) => 
 
         // Get treatments
         const treatments = await db.query(
-            `SELECT vt.quantity, vt.price, vt.total_price,
+            `SELECT vt.actual_price as price, vt.tooth_numbers, vt.notes,
                     t.code, t.name
              FROM visit_treatments vt
              JOIN treatments t ON vt.treatment_id = t.treatment_id
@@ -2500,7 +2470,7 @@ app.get('/api/reports/daily-summary', authMiddleware, checkRole('admin'), async 
                     COUNT(CASE WHEN status = 'waiting' THEN 1 END) as waiting_visits,
                     COUNT(CASE WHEN status = 'in_progress' THEN 1 END) as in_progress_visits
              FROM visits
-             WHERE clinic_id = $1 AND visit_date = $2`,
+             WHERE clinic_id = $1 AND DATE(check_in_time) = $2`,
             [clinic_id, date]
         );
 
@@ -2511,7 +2481,7 @@ app.get('/api/reports/daily-summary', authMiddleware, checkRole('admin'), async 
                     COALESCE(SUM(CASE WHEN b.status = 'pending' THEN b.total_amount ELSE 0 END), 0) as pending_revenue
              FROM billing b
              JOIN visits v ON b.visit_id = v.visit_id
-             WHERE v.clinic_id = $1 AND v.visit_date = $2`,
+             WHERE v.clinic_id = $1 AND DATE(v.check_in_time) = $2`,
             [clinic_id, date]
         );
 
@@ -2519,12 +2489,11 @@ app.get('/api/reports/daily-summary', authMiddleware, checkRole('admin'), async 
         const treatmentsResult = await db.query(
             `SELECT t.code, t.name,
                     COUNT(*) as usage_count,
-                    SUM(vt.quantity) as total_quantity,
-                    SUM(vt.total_price) as total_revenue
+                    SUM(vt.actual_price) as total_revenue
              FROM visit_treatments vt
              JOIN treatments t ON vt.treatment_id = t.treatment_id
              JOIN visits v ON vt.visit_id = v.visit_id
-             WHERE v.clinic_id = $1 AND v.visit_date = $2
+             WHERE v.clinic_id = $1 AND DATE(v.check_in_time) = $2
              GROUP BY t.treatment_id, t.code, t.name
              ORDER BY usage_count DESC
              LIMIT 10`,
@@ -2538,7 +2507,7 @@ app.get('/api/reports/daily-summary', authMiddleware, checkRole('admin'), async 
                     COUNT(CASE WHEN v.status = 'completed' THEN 1 END) as completed_visits
              FROM visits v
              JOIN doctors_identities di ON v.doctor_id = di.doctor_id
-             WHERE v.clinic_id = $1 AND v.visit_date = $2
+             WHERE v.clinic_id = $1 AND DATE(v.check_in_time) = $2
              GROUP BY di.doctor_id, di.full_name
              ORDER BY total_visits DESC`,
             [clinic_id, date]
