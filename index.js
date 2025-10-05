@@ -2069,6 +2069,56 @@ app.get('/api/visit-treatments/:id', authMiddleware, async (req, res) => {
     }
 });
 
+// GET doctor's common prices for a treatment
+app.get('/api/doctor-prices/:treatment_id', authMiddleware, checkRole('doctor'), async (req, res) => {
+    const treatment_id = parseInt(req.params.treatment_id);
+    const doctor_id = parseInt(req.user.id);
+
+    try {
+        const { rows } = await db.query(
+            `SELECT custom_price, frequency_count, last_used_at
+             FROM doctor_common_prices
+             WHERE doctor_id = $1 AND treatment_id = $2
+             ORDER BY frequency_count DESC, last_used_at DESC
+             LIMIT 5`,
+            [doctor_id, treatment_id]
+        );
+
+        res.json(rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch doctor prices');
+    }
+});
+
+// POST track doctor's price usage (called after successful save)
+app.post('/api/doctor-prices/track', authMiddleware, checkRole('doctor'), async (req, res) => {
+    const { treatment_id, custom_price, standard_price } = req.body;
+    const doctor_id = parseInt(req.user.id);
+
+    try {
+        // Only track if it's different from standard price
+        if (parseFloat(custom_price) === parseFloat(standard_price)) {
+            return res.json({ message: 'Standard price, not tracked' });
+        }
+
+        // Try to update existing record or insert new one
+        const { rows } = await db.query(
+            `INSERT INTO doctor_common_prices (doctor_id, treatment_id, custom_price, frequency_count, last_used_at)
+             VALUES ($1, $2, $3, 1, NOW())
+             ON CONFLICT (doctor_id, treatment_id, custom_price)
+             DO UPDATE SET
+                frequency_count = doctor_common_prices.frequency_count + 1,
+                last_used_at = NOW()
+             RETURNING *`,
+            [doctor_id, treatment_id, custom_price]
+        );
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to track price');
+    }
+});
+
 // POST save treatment record for a treatment plan
 app.post('/api/treatment-plans/record', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
     const { plan_id, treatment_record, recorded_at } = req.body;
