@@ -1932,11 +1932,16 @@ app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res
 
     try {
         // THE FIX: Changed ORDER BY from "vt.created_at" to "vt.visit_treatment_id"
+        // Added doctor name from visits table
         const { rows } = await db.query(
             `SELECT vt.*,
-                    t.code, t.name, t.category, t.standard_price
+                    t.code, t.name, t.category, t.standard_price,
+                    v.doctor_id,
+                    di.full_name as doctor_name
              FROM visit_treatments vt
              JOIN treatments t ON vt.treatment_id = t.treatment_id
+             JOIN visits v ON vt.visit_id = v.visit_id
+             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
              WHERE vt.visit_id = $1
              ORDER BY vt.visit_treatment_id`, // <-- FIX IS HERE
             [visit_id]
@@ -1950,7 +1955,7 @@ app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res
 // PUT update visit treatment (doctor/nurse/admin)
 app.put('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
     const id = parseInt(req.params.id);
-    const { custom_price, tooth_numbers, notes } = req.body;
+    const { custom_price, tooth_numbers, notes, status, treatment_record, recorded_at } = req.body;
 
     try {
         // Get current visit treatment
@@ -1984,6 +1989,21 @@ app.put('/api/visit-treatments/:id', authMiddleware, checkRole('doctor', 'nurse'
         if (notes !== undefined) {
             updates.push(`notes = $${paramIndex++}`);
             values.push(notes);
+        }
+
+        if (status !== undefined) {
+            updates.push(`status = $${paramIndex++}`);
+            values.push(status);
+        }
+
+        if (treatment_record !== undefined) {
+            updates.push(`treatment_record = $${paramIndex++}`);
+            values.push(treatment_record);
+        }
+
+        if (recorded_at !== undefined) {
+            updates.push(`recorded_at = $${paramIndex++}`);
+            values.push(recorded_at);
         }
 
         if (updates.length === 0) {
