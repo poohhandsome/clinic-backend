@@ -3227,14 +3227,114 @@ app.get('/api/billing/export-excel', authMiddleware, async (req, res) => {
     }
 
     try {
-        // Get the payroll report data (reuse the logic)
-        const reportRes = await authorizedFetch(
-            `http://localhost:${port}/api/billing/payroll-report?clinic_id=${clinic_id}&start_date=${start_date}&end_date=${end_date}${doctor_ids ? `&doctor_ids=${doctor_ids}` : ''}`,
-            { headers: { Authorization: req.headers.authorization } }
+        // Get compensation rules
+        const rulesResult = await db.query(
+            `SELECT treatment_id, rule_type, value
+             FROM compensation_rules
+             WHERE clinic_id = $1`,
+            [clinic_id]
         );
 
-        if (!reportRes.ok) throw new Error('Failed to fetch report data');
-        const reportData = await reportRes.json();
+        const rules = {};
+        let defaultRate = 50;
+
+        rulesResult.rows.forEach(rule => {
+            if (rule.treatment_id === null) {
+                defaultRate = parseFloat(rule.value);
+            } else {
+                rules[rule.treatment_id] = {
+                    type: rule.rule_type,
+                    value: parseFloat(rule.value)
+                };
+            }
+        });
+
+        // Build doctor filter
+        let doctorFilter = '';
+        const queryParams = [clinic_id, start_date, end_date];
+        if (doctor_ids) {
+            const ids = doctor_ids.split(',').map(id => parseInt(id));
+            doctorFilter = `AND v.doctor_id = ANY($4)`;
+            queryParams.push(ids);
+        }
+
+        // Get all billable procedures
+        const query = `
+            SELECT
+                v.visit_id,
+                v.check_in_time as date,
+                p.dn as patient_case,
+                t.treatment_id,
+                t.name as procedure_name,
+                t.code as procedure_code,
+                vt.actual_price as total_cost,
+                di.full_name as doctor_name,
+                v.doctor_id
+            FROM visit_treatments vt
+            JOIN visits v ON vt.visit_id = v.visit_id
+            JOIN treatments t ON vt.treatment_id = t.treatment_id
+            JOIN patients p ON v.patient_id = p.patient_id
+            JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+            WHERE v.clinic_id = $1
+            AND DATE(v.check_in_time) BETWEEN $2 AND $3
+            ${doctorFilter}
+            AND vt.actual_price > 0
+            ORDER BY v.check_in_time, v.visit_id
+        `;
+
+        const { rows } = await db.query(query, queryParams);
+
+        // Calculate compensation for each procedure
+        const breakdown = rows.map(row => {
+            const totalCost = parseFloat(row.total_cost);
+            let doctorShare = 0;
+            let ruleApplied = '';
+
+            const rule = rules[row.treatment_id];
+
+            if (rule) {
+                if (rule.type === 'percentage') {
+                    doctorShare = totalCost * (rule.value / 100);
+                    ruleApplied = `${row.procedure_code}: ${rule.value}%`;
+                } else if (rule.type === 'fixed') {
+                    doctorShare = rule.value;
+                    ruleApplied = `${row.procedure_code}: Fixed ฿${rule.value.toLocaleString()}`;
+                }
+            } else {
+                doctorShare = totalCost * (defaultRate / 100);
+                ruleApplied = `Default: ${defaultRate}%`;
+            }
+
+            const clinicShare = totalCost - doctorShare;
+
+            return {
+                date: row.date,
+                patient_case: row.patient_case,
+                procedure_name: row.procedure_name,
+                total_cost: totalCost,
+                doctor_name: row.doctor_name,
+                rule_applied: ruleApplied,
+                doctor_share: doctorShare,
+                clinic_share: clinicShare
+            };
+        });
+
+        // Calculate summary
+        const summary = {
+            totalRevenue: breakdown.reduce((sum, item) => sum + item.total_cost, 0),
+            totalDoctorPayments: breakdown.reduce((sum, item) => sum + item.doctor_share, 0),
+            totalClinicRevenue: breakdown.reduce((sum, item) => sum + item.clinic_share, 0),
+            doctorPayments: {}
+        };
+
+        breakdown.forEach(item => {
+            if (!summary.doctorPayments[item.doctor_name]) {
+                summary.doctorPayments[item.doctor_name] = 0;
+            }
+            summary.doctorPayments[item.doctor_name] += item.doctor_share;
+        });
+
+        const reportData = { breakdown, summary };
 
         // Generate CSV
         const headers = [
@@ -3292,14 +3392,99 @@ app.get('/api/billing/doctor-summaries-pdf', authMiddleware, async (req, res) =>
     }
 
     try {
-        // Get the payroll report data
-        const reportRes = await authorizedFetch(
-            `http://localhost:${port}/api/billing/payroll-report?clinic_id=${clinic_id}&start_date=${start_date}&end_date=${end_date}${doctor_ids ? `&doctor_ids=${doctor_ids}` : ''}`,
-            { headers: { Authorization: req.headers.authorization } }
+        // Get compensation rules
+        const rulesResult = await db.query(
+            `SELECT treatment_id, rule_type, value
+             FROM compensation_rules
+             WHERE clinic_id = $1`,
+            [clinic_id]
         );
 
-        if (!reportRes.ok) throw new Error('Failed to fetch report data');
-        const reportData = await reportRes.json();
+        const rules = {};
+        let defaultRate = 50;
+
+        rulesResult.rows.forEach(rule => {
+            if (rule.treatment_id === null) {
+                defaultRate = parseFloat(rule.value);
+            } else {
+                rules[rule.treatment_id] = {
+                    type: rule.rule_type,
+                    value: parseFloat(rule.value)
+                };
+            }
+        });
+
+        // Build doctor filter
+        let doctorFilter = '';
+        const queryParams = [clinic_id, start_date, end_date];
+        if (doctor_ids) {
+            const ids = doctor_ids.split(',').map(id => parseInt(id));
+            doctorFilter = `AND v.doctor_id = ANY($4)`;
+            queryParams.push(ids);
+        }
+
+        // Get all billable procedures
+        const query = `
+            SELECT
+                v.visit_id,
+                v.check_in_time as date,
+                p.dn as patient_case,
+                t.treatment_id,
+                t.name as procedure_name,
+                t.code as procedure_code,
+                vt.actual_price as total_cost,
+                di.full_name as doctor_name,
+                v.doctor_id
+            FROM visit_treatments vt
+            JOIN visits v ON vt.visit_id = v.visit_id
+            JOIN treatments t ON vt.treatment_id = t.treatment_id
+            JOIN patients p ON v.patient_id = p.patient_id
+            JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+            WHERE v.clinic_id = $1
+            AND DATE(v.check_in_time) BETWEEN $2 AND $3
+            ${doctorFilter}
+            AND vt.actual_price > 0
+            ORDER BY v.check_in_time, v.visit_id
+        `;
+
+        const { rows } = await db.query(query, queryParams);
+
+        // Calculate compensation for each procedure
+        const breakdown = rows.map(row => {
+            const totalCost = parseFloat(row.total_cost);
+            let doctorShare = 0;
+            let ruleApplied = '';
+
+            const rule = rules[row.treatment_id];
+
+            if (rule) {
+                if (rule.type === 'percentage') {
+                    doctorShare = totalCost * (rule.value / 100);
+                    ruleApplied = `${row.procedure_code}: ${rule.value}%`;
+                } else if (rule.type === 'fixed') {
+                    doctorShare = rule.value;
+                    ruleApplied = `${row.procedure_code}: Fixed ฿${rule.value.toLocaleString()}`;
+                }
+            } else {
+                doctorShare = totalCost * (defaultRate / 100);
+                ruleApplied = `Default: ${defaultRate}%`;
+            }
+
+            const clinicShare = totalCost - doctorShare;
+
+            return {
+                date: row.date,
+                patient_case: row.patient_case,
+                procedure_name: row.procedure_name,
+                total_cost: totalCost,
+                doctor_name: row.doctor_name,
+                rule_applied: ruleApplied,
+                doctor_share: doctorShare,
+                clinic_share: clinicShare
+            };
+        });
+
+        const reportData = { breakdown };
 
         // Group procedures by doctor
         const doctorData = {};
