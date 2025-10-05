@@ -3009,6 +3009,401 @@ app.get('/api/operations/export', authMiddleware, async (req, res) => {
     }
 });
 
+// =====================================================================
+// DOCTOR PAYROLL & FINANCIAL REPORTING API ENDPOINTS
+// =====================================================================
+
+// GET compensation rules
+app.get('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
+    const { clinic_id } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        // Get default rule
+        const defaultRule = await db.query(
+            `SELECT value FROM compensation_rules
+             WHERE clinic_id = $1 AND rule_type = 'default'
+             LIMIT 1`,
+            [clinic_id]
+        );
+
+        // Get procedure-specific rules
+        const procedureRules = await db.query(
+            `SELECT rule_id, treatment_id, rule_type, value
+             FROM compensation_rules
+             WHERE clinic_id = $1 AND rule_type != 'default'
+             ORDER BY rule_id`,
+            [clinic_id]
+        );
+
+        res.json({
+            defaultRate: defaultRule.rows[0]?.value || 50,
+            procedureRules: procedureRules.rows
+        });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch compensation rules');
+    }
+});
+
+// PUT update compensation rules
+app.put('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
+    const { clinic_id } = req.query;
+    const { defaultRate, procedureRules } = req.body;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    const client = await db.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        // Delete existing rules for this clinic
+        await client.query(
+            'DELETE FROM compensation_rules WHERE clinic_id = $1',
+            [clinic_id]
+        );
+
+        // Insert default rule
+        await client.query(
+            `INSERT INTO compensation_rules (clinic_id, treatment_id, rule_type, value)
+             VALUES ($1, NULL, 'default', $2)`,
+            [clinic_id, defaultRate]
+        );
+
+        // Insert procedure-specific rules
+        for (const rule of procedureRules) {
+            if (rule.treatment_id) {
+                await client.query(
+                    `INSERT INTO compensation_rules (clinic_id, treatment_id, rule_type, value)
+                     VALUES ($1, $2, $3, $4)`,
+                    [clinic_id, rule.treatment_id, rule.rule_type, rule.value]
+                );
+            }
+        }
+
+        await client.query('COMMIT');
+        res.json({ message: 'Compensation rules updated successfully' });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        handleError(res, err, 'Failed to update compensation rules');
+    } finally {
+        client.release();
+    }
+});
+
+// GET payroll report
+app.get('/api/billing/payroll-report', authMiddleware, async (req, res) => {
+    const { clinic_id, start_date, end_date, doctor_ids } = req.query;
+
+    if (!clinic_id || !start_date || !end_date) {
+        return res.status(400).json({ message: 'Clinic ID, start date, and end date are required' });
+    }
+
+    try {
+        // Get compensation rules
+        const rulesResult = await db.query(
+            `SELECT treatment_id, rule_type, value
+             FROM compensation_rules
+             WHERE clinic_id = $1`,
+            [clinic_id]
+        );
+
+        const rules = {};
+        let defaultRate = 50;
+
+        rulesResult.rows.forEach(rule => {
+            if (rule.treatment_id === null) {
+                defaultRate = parseFloat(rule.value);
+            } else {
+                rules[rule.treatment_id] = {
+                    type: rule.rule_type,
+                    value: parseFloat(rule.value)
+                };
+            }
+        });
+
+        // Build doctor filter
+        let doctorFilter = '';
+        const queryParams = [clinic_id, start_date, end_date];
+        if (doctor_ids) {
+            const ids = doctor_ids.split(',').map(id => parseInt(id));
+            doctorFilter = `AND v.doctor_id = ANY($4)`;
+            queryParams.push(ids);
+        }
+
+        // Get all billable procedures
+        const query = `
+            SELECT
+                v.visit_id,
+                v.check_in_time as date,
+                p.dn as patient_case,
+                t.treatment_id,
+                t.name as procedure_name,
+                t.code as procedure_code,
+                vt.actual_price as total_cost,
+                di.full_name as doctor_name,
+                v.doctor_id
+            FROM visit_treatments vt
+            JOIN visits v ON vt.visit_id = v.visit_id
+            JOIN treatments t ON vt.treatment_id = t.treatment_id
+            JOIN patients p ON v.patient_id = p.patient_id
+            JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+            WHERE v.clinic_id = $1
+            AND DATE(v.check_in_time) BETWEEN $2 AND $3
+            ${doctorFilter}
+            AND vt.actual_price > 0
+            ORDER BY v.check_in_time, v.visit_id
+        `;
+
+        const { rows } = await db.query(query, queryParams);
+
+        // Calculate compensation for each procedure
+        const breakdown = rows.map(row => {
+            const totalCost = parseFloat(row.total_cost);
+            let doctorShare = 0;
+            let ruleApplied = '';
+
+            const rule = rules[row.treatment_id];
+
+            if (rule) {
+                if (rule.type === 'percentage') {
+                    doctorShare = totalCost * (rule.value / 100);
+                    ruleApplied = `${row.procedure_code}: ${rule.value}%`;
+                } else if (rule.type === 'fixed') {
+                    doctorShare = rule.value;
+                    ruleApplied = `${row.procedure_code}: Fixed ฿${rule.value.toLocaleString()}`;
+                }
+            } else {
+                doctorShare = totalCost * (defaultRate / 100);
+                ruleApplied = `Default: ${defaultRate}%`;
+            }
+
+            const clinicShare = totalCost - doctorShare;
+
+            return {
+                date: row.date,
+                patient_case: row.patient_case,
+                procedure_name: row.procedure_name,
+                total_cost: totalCost,
+                doctor_name: row.doctor_name,
+                rule_applied: ruleApplied,
+                doctor_share: doctorShare,
+                clinic_share: clinicShare
+            };
+        });
+
+        // Calculate summary
+        const summary = {
+            totalRevenue: breakdown.reduce((sum, item) => sum + item.total_cost, 0),
+            totalDoctorPayments: breakdown.reduce((sum, item) => sum + item.doctor_share, 0),
+            totalClinicRevenue: breakdown.reduce((sum, item) => sum + item.clinic_share, 0),
+            doctorPayments: {}
+        };
+
+        breakdown.forEach(item => {
+            if (!summary.doctorPayments[item.doctor_name]) {
+                summary.doctorPayments[item.doctor_name] = 0;
+            }
+            summary.doctorPayments[item.doctor_name] += item.doctor_share;
+        });
+
+        res.json({ breakdown, summary });
+    } catch (err) {
+        handleError(res, err, 'Failed to generate payroll report');
+    }
+});
+
+// GET export to Excel
+app.get('/api/billing/export-excel', authMiddleware, async (req, res) => {
+    const { clinic_id, start_date, end_date, doctor_ids } = req.query;
+
+    if (!clinic_id || !start_date || !end_date) {
+        return res.status(400).json({ message: 'Clinic ID, start date, and end date are required' });
+    }
+
+    try {
+        // Get the payroll report data (reuse the logic)
+        const reportRes = await authorizedFetch(
+            `http://localhost:${port}/api/billing/payroll-report?clinic_id=${clinic_id}&start_date=${start_date}&end_date=${end_date}${doctor_ids ? `&doctor_ids=${doctor_ids}` : ''}`,
+            { headers: { Authorization: req.headers.authorization } }
+        );
+
+        if (!reportRes.ok) throw new Error('Failed to fetch report data');
+        const reportData = await reportRes.json();
+
+        // Generate CSV
+        const headers = [
+            'Date',
+            'Patient Case #',
+            'Procedure',
+            'Total Cost (THB)',
+            'Performing Doctor',
+            'Compensation Rule Applied',
+            "Doctor's Share (THB)",
+            "Clinic's Share (THB)"
+        ].join(',');
+
+        const csvRows = reportData.breakdown.map(row =>
+            [
+                new Date(row.date).toLocaleDateString('th-TH'),
+                row.patient_case,
+                `"${row.procedure_name}"`,
+                row.total_cost.toFixed(2),
+                `"${row.doctor_name}"`,
+                `"${row.rule_applied}"`,
+                row.doctor_share.toFixed(2),
+                row.clinic_share.toFixed(2)
+            ].join(',')
+        );
+
+        // Add summary
+        csvRows.push('');
+        csvRows.push('SUMMARY');
+        csvRows.push(`Total Revenue,,,${reportData.summary.totalRevenue.toFixed(2)}`);
+        csvRows.push(`Total Doctor Payments,,,${reportData.summary.totalDoctorPayments.toFixed(2)}`);
+        csvRows.push(`Total Clinic Revenue,,,${reportData.summary.totalClinicRevenue.toFixed(2)}`);
+        csvRows.push('');
+        csvRows.push('DOCTOR PAYMENTS');
+        Object.entries(reportData.summary.doctorPayments).forEach(([doctor, amount]) => {
+            csvRows.push(`"${doctor}",,,${amount.toFixed(2)}`);
+        });
+
+        const csv = [headers, ...csvRows].join('\n');
+
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="payroll_report_${start_date}_${end_date}.csv"`);
+        res.send('\uFEFF' + csv); // Add BOM for Excel UTF-8 support
+    } catch (err) {
+        handleError(res, err, 'Failed to export to Excel');
+    }
+});
+
+// GET doctor summaries PDF
+app.get('/api/billing/doctor-summaries-pdf', authMiddleware, async (req, res) => {
+    const { clinic_id, start_date, end_date, doctor_ids } = req.query;
+
+    if (!clinic_id || !start_date || !end_date) {
+        return res.status(400).json({ message: 'Clinic ID, start date, and end date are required' });
+    }
+
+    try {
+        // Get the payroll report data
+        const reportRes = await authorizedFetch(
+            `http://localhost:${port}/api/billing/payroll-report?clinic_id=${clinic_id}&start_date=${start_date}&end_date=${end_date}${doctor_ids ? `&doctor_ids=${doctor_ids}` : ''}`,
+            { headers: { Authorization: req.headers.authorization } }
+        );
+
+        if (!reportRes.ok) throw new Error('Failed to fetch report data');
+        const reportData = await reportRes.json();
+
+        // Group procedures by doctor
+        const doctorData = {};
+        reportData.breakdown.forEach(item => {
+            if (!doctorData[item.doctor_name]) {
+                doctorData[item.doctor_name] = {
+                    procedures: [],
+                    total: 0
+                };
+            }
+            doctorData[item.doctor_name].procedures.push(item);
+            doctorData[item.doctor_name].total += item.doctor_share;
+        });
+
+        // Generate HTML for PDF
+        const startMonth = new Date(start_date).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+        const endMonth = new Date(end_date).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+        const period = start_date.substring(0, 7) === end_date.substring(0, 7) ? startMonth : `${startMonth} - ${endMonth}`;
+
+        let html = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Doctor Payment Summaries</title>
+    <style>
+        @page { size: A4; margin: 2cm; }
+        body { font-family: 'Arial', sans-serif; font-size: 12px; }
+        .page-break { page-break-after: always; }
+        .header { text-align: center; margin-bottom: 30px; border-bottom: 3px solid #333; padding-bottom: 20px; }
+        .header h1 { margin: 0; color: #333; font-size: 24px; }
+        .header .period { color: #666; font-size: 16px; margin-top: 10px; }
+        .doctor-name { font-size: 20px; font-weight: bold; color: #2563EB; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 30px; }
+        th { background-color: #f3f4f6; padding: 10px; text-align: left; border-bottom: 2px solid #ddd; font-weight: bold; }
+        td { padding: 8px; border-bottom: 1px solid #eee; }
+        .total-row { background-color: #f0f9ff; font-weight: bold; font-size: 18px; padding: 15px; }
+        .total-amount { color: #10B981; font-size: 32px; text-align: right; margin-top: 20px; padding: 20px; background-color: #f0fdf4; border-radius: 8px; }
+        @media print {
+            .page-break { page-break-after: always; }
+        }
+    </style>
+</head>
+<body>
+`;
+
+        let isFirst = true;
+        Object.entries(doctorData).forEach(([doctorName, data]) => {
+            if (!isFirst) {
+                html += '<div class="page-break"></div>';
+            }
+            isFirst = false;
+
+            html += `
+    <div class="header">
+        <h1>Newtrend Dental Clinic</h1>
+        <div class="period">Payment Summary - ${period}</div>
+    </div>
+    <div class="doctor-name">Dr. ${doctorName}</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Patient</th>
+                <th>Procedure</th>
+                <th style="text-align: right;">Payment (THB)</th>
+            </tr>
+        </thead>
+        <tbody>
+`;
+
+            data.procedures.forEach(proc => {
+                html += `
+            <tr>
+                <td>${new Date(proc.date).toLocaleDateString('th-TH')}</td>
+                <td>${proc.patient_case}</td>
+                <td>${proc.procedure_name}</td>
+                <td style="text-align: right;">฿${proc.doctor_share.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+            </tr>
+`;
+            });
+
+            html += `
+        </tbody>
+    </table>
+    <div class="total-amount">
+        <div style="text-align: left; font-size: 16px; color: #666; margin-bottom: 10px;">TOTAL PAYMENT DUE</div>
+        <div style="font-weight: bold;">฿${data.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+    </div>
+`;
+        });
+
+        html += `
+</body>
+</html>
+`;
+
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(html);
+    } catch (err) {
+        handleError(res, err, 'Failed to generate doctor summaries PDF');
+    }
+});
+
 app.listen(port, () => {
     console.log(`✅ Server started on port ${port}`);
 });
