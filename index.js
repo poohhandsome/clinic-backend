@@ -1153,26 +1153,41 @@ app.post('/api/patients/:patientId/documents', authMiddleware, async (req, res) 
 });
 
 
-// --- Health Check Endpoint ---
+// --- Health Check Endpoint (Neon-optimized) ---
+// Cache database status to avoid waking Neon on every health check
+let lastDbCheck = null;
+let dbStatus = 'unknown';
+const DB_CHECK_INTERVAL = 5 * 60 * 1000; // Only check database every 5 minutes
+
 app.get('/api/health', async (req, res) => {
-    try {
-        // Check database connection
-        await db.query('SELECT 1');
-        res.status(200).json({
-            status: 'ok',
-            timestamp: new Date().toISOString(),
-            uptime: process.uptime(),
-            environment: process.env.NODE_ENV || 'development',
-            database: 'connected'
-        });
-    } catch (err) {
-        res.status(503).json({
-            status: 'error',
-            timestamp: new Date().toISOString(),
-            database: 'disconnected',
-            error: process.env.NODE_ENV === 'production' ? 'Database unavailable' : err.message
-        });
+    const now = Date.now();
+    const forceDbCheck = req.query.db === 'true'; // Allow manual DB check with ?db=true
+
+    // Only check database every 5 minutes OR if explicitly requested
+    // This prevents UptimeRobot from keeping Neon awake
+    if (forceDbCheck || !lastDbCheck || (now - lastDbCheck) > DB_CHECK_INTERVAL) {
+        try {
+            await db.query('SELECT 1');
+            dbStatus = 'connected';
+            lastDbCheck = now;
+        } catch (err) {
+            dbStatus = 'error';
+            lastDbCheck = now;
+            console.error('Database health check failed:', err.message);
+        }
     }
+
+    res.status(200).json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        environment: process.env.NODE_ENV || 'development',
+        database: {
+            status: dbStatus,
+            lastChecked: lastDbCheck ? new Date(lastDbCheck).toISOString() : null,
+            nextCheck: lastDbCheck ? new Date(lastDbCheck + DB_CHECK_INTERVAL).toISOString() : null
+        }
+    });
 });
 
 // =====================================================================

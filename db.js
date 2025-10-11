@@ -10,9 +10,12 @@ const pool = new Pool({
   ssl: {
     rejectUnauthorized: process.env.NODE_ENV === 'production' ? true : false
   },
-  max: 20, // Maximum number of clients in pool
-  idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
-  connectionTimeoutMillis: 2000, // Return error after 2 seconds if unable to connect
+
+  // Neon-optimized settings for auto-suspend (saves compute hours)
+  max: 10,                      // Maximum pool size (reduced from 20)
+  min: 0,                       // CRITICAL: Allow pool to go to 0 connections (enables Neon auto-suspend)
+  idleTimeoutMillis: 30000,     // Close idle connections after 30 seconds
+  connectionTimeoutMillis: 10000, // Timeout after 10 seconds (increased from 2s for reliability)
 });
 
 // Handle pool errors to prevent application crashes
@@ -22,6 +25,22 @@ pool.on('error', (err, client) => {
   if (process.env.NODE_ENV !== 'production') {
     process.exit(-1);
   }
+});
+
+// Graceful shutdown - close all connections on app termination
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, closing database pool...');
+  pool.end(() => {
+    console.log('Database pool closed');
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, closing database pool...');
+  pool.end(() => {
+    console.log('Database pool closed');
+    process.exit(0);
+  });
 });
 
 module.exports = {
