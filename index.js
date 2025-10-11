@@ -432,15 +432,36 @@ app.post('/api/patients', authMiddleware, checkRole('nurse', 'doctor', 'admin'),
 });
 
 app.get('/api/patients', authMiddleware, async (req, res) => {
-    const { query } = req.query;
+    const { query, page = 1, limit = 50 } = req.query;
+
     try {
         const search_query = `%${query}%`;
-        const { rows } = await db.query(
-            `SELECT patient_id, dn, dn_old, first_name_th, last_name_th, mobile_phone FROM patients
+        const offset = (parseInt(page) - 1) * parseInt(limit);
+
+        // Get total count for pagination
+        const countResult = await db.query(
+            `SELECT COUNT(*) as total FROM patients
              WHERE first_name_th ILIKE $1 OR last_name_th ILIKE $1 OR mobile_phone ILIKE $1 OR dn ILIKE $1`,
             [search_query]
         );
-        res.json(rows);
+
+        const { rows } = await db.query(
+            `SELECT patient_id, dn, dn_old, first_name_th, last_name_th, mobile_phone FROM patients
+             WHERE first_name_th ILIKE $1 OR last_name_th ILIKE $1 OR mobile_phone ILIKE $1 OR dn ILIKE $1
+             ORDER BY patient_id DESC
+             LIMIT $2 OFFSET $3`,
+            [search_query, parseInt(limit), offset]
+        );
+
+        res.json({
+            data: rows,
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                total: parseInt(countResult.rows[0].total),
+                totalPages: Math.ceil(parseInt(countResult.rows[0].total) / parseInt(limit))
+            }
+        });
     } catch (err) {
         console.error("Error in GET /api/patients:", err.message);
         res.status(500).json({ message: 'Server Error' });
@@ -588,7 +609,19 @@ app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) 
 app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const doctor_id = parseInt(req.params.doctor_id);
     const { availability } = req.body; // Expects an array with a single schedule object
+
+    // Validation: Check if availability is a valid non-empty array
+    if (!availability || !Array.isArray(availability) || availability.length === 0) {
+        return res.status(400).json({ message: 'Availability data is required and must be a non-empty array' });
+    }
+
     const slot = availability[0];
+
+    // Validation: Check if slot has required fields
+    if (!slot.clinic_id || slot.day_of_week === undefined || !slot.start_time || !slot.end_time) {
+        return res.status(400).json({ message: 'Missing required fields: clinic_id, day_of_week, start_time, end_time' });
+    }
+
     try {
         await db.query(
             'INSERT INTO doctor_availability (doctor_id, clinic_id, day_of_week, start_time, end_time) VALUES ($1, $2, $3, $4, $5)',
@@ -995,13 +1028,11 @@ app.get('/api/patients/:patientId/treatment-history', authMiddleware, async (req
     const patientId = parseInt(req.params.patientId);
     try {
         const plans = await db.query('SELECT * FROM treatment_plans WHERE patient_id = $1 ORDER BY plan_date DESC', [patientId]);
-        const items = await db.query('SELECT ti.* FROM treatment_items ti JOIN treatment_plans tp ON ti.plan_id = tp.plan_id WHERE tp.patient_id = $1', [patientId]);
         const findings = await db.query('SELECT * FROM examination_findings WHERE patient_id = $1 ORDER BY finding_date DESC', [patientId]);
         const documents = await db.query('SELECT * FROM patient_documents WHERE patient_id = $1 ORDER BY uploaded_at DESC', [patientId]);
 
         res.json({
             plans: plans.rows,
-            items: items.rows,
             findings: findings.rows,
             documents: documents.rows
         });
@@ -1150,13 +1181,31 @@ app.get('/api/health', async (req, res) => {
 
 // GET all treatments
 app.get('/api/treatments', authMiddleware, async (req, res) => {
+    const { page = 1, limit = 100 } = req.query;
+
     try {
+        const offset = (parseInt(page) - 1) * parseInt(limit);
+
+        // Get total count
+        const countResult = await db.query('SELECT COUNT(*) as total FROM treatments');
+
         const { rows } = await db.query(
             `SELECT treatment_id, code, name, standard_price, category, description, created_at
              FROM treatments
-             ORDER BY category, code`
+             ORDER BY category, code
+             LIMIT $1 OFFSET $2`,
+            [parseInt(limit), offset]
         );
-        res.json(rows);
+
+        res.json({
+            data: rows,
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                total: parseInt(countResult.rows[0].total),
+                totalPages: Math.ceil(parseInt(countResult.rows[0].total) / parseInt(limit))
+            }
+        });
     } catch (err) {
         handleError(res, err, 'Failed to fetch treatments');
     }
@@ -1577,7 +1626,8 @@ app.put('/api/visits/:id/complete', authMiddleware, checkRole('doctor', 'admin')
 // PUT checkout visit with password verification (doctor only)
 app.put('/api/visits/:id/checkout', authMiddleware, async (req, res) => {
     const id = parseInt(req.params.id);
-    const { password, status, payment_method, amount_paid, transaction_ref } = req.body;
+    const { password, status, payment_method, transaction_ref } = req.body;
+    const amount_paid = req.body.amount_paid ? parseFloat(req.body.amount_paid) : null;
     const userRole = req.user.role;
 
     if (!status || !['draft_checkout', 'completed'].includes(status)) {
@@ -1838,9 +1888,9 @@ app.post('/api/treatment-plans', authMiddleware, checkRole('doctor', 'admin'), a
     }
 
     try {
-        // Get patient_id from appointment (visit)
+        // Get patient_id from visit
         const visitCheck = await db.query(
-            'SELECT patient_id FROM appointments WHERE appointment_id = $1',
+            'SELECT patient_id FROM visits WHERE visit_id = $1',
             [visit_id]
         );
 
@@ -1986,7 +2036,7 @@ app.delete('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admi
 
 // POST add treatment to visit (doctor/nurse/admin)
 app.post('/api/visit-treatments', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
-    const { visit_id, treatment_id, quantity, custom_price, tooth_numbers, notes } = req.body;
+    const { visit_id, treatment_id, custom_price, tooth_numbers, notes } = req.body;
 
     // Validation
     if (!visit_id || !treatment_id) {
@@ -2452,7 +2502,7 @@ app.put('/api/billing/:id/payment', authMiddleware, checkRole('nurse', 'admin'),
 
         const { rows } = await db.query(
             `UPDATE billing
-             SET payment_method = $1, paid_amount = $2, payment_date = NOW(), status = 'paid'
+             SET payment_method = $1, amount_paid = $2, paid_at = NOW(), payment_status = 'paid'
              WHERE billing_id = $3
              RETURNING *`,
             [payment_method.toLowerCase(), amount, id]
@@ -2672,8 +2722,7 @@ app.get('/api/history/visit/:visit_id/pdf', authMiddleware, async (req, res) => 
         // Get treatment plan
         const plan = await db.query(
             `SELECT tp.* FROM treatment_plans tp
-             JOIN examination_findings ef ON tp.examination_id = ef.finding_id
-             WHERE ef.visit_id = $1`,
+             WHERE tp.visit_id = $1`,
             [visit_id]
         );
 
