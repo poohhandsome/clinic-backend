@@ -10,11 +10,11 @@ const bcrypt = require('bcrypt');
 const readline = require('readline');
 require('dotenv').config();
 
-// Database connection
+// Database connection - Supabase compatible SSL settings
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
-    rejectUnauthorized: process.env.NODE_ENV === 'production'
+    rejectUnauthorized: false // Set to false for Supabase to avoid certificate issues
   }
 });
 
