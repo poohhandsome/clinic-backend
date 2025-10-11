@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 /* ===============================================================
-   CLINIC MANAGEMENT SYSTEM - INITIAL ACCOUNT SETUP
-   Creates Super Admin and Sample Worker Accounts
+   CLINIC MANAGEMENT SYSTEM - ADMIN ACCOUNT SETUP
+   Creates System Administrator Accounts
    =============================================================== */
 
 const { Pool } = require('pg');
@@ -62,28 +62,17 @@ function validateEmail(email) {
   return emailRegex.test(email);
 }
 
-// Color code validation
-function validateColor(color) {
-  const colorRegex = /^#[0-9A-Fa-f]{6}$/;
-  return colorRegex.test(color);
-}
-
-// Create Super Admin Doctor Account
-async function createSuperAdmin() {
-  console.log('\n🔐 SUPER ADMIN ACCOUNT CREATION');
+// Create Admin Account
+async function createAdmin() {
+  console.log('\n👑 ADMIN ACCOUNT CREATION');
   console.log('━'.repeat(70));
-  console.log('This will create a doctor account with FULL system access.');
-  console.log('Super admins can access ALL pages and manage ALL settings.\n');
-
-  const createAdmin = await question('Create Super Admin account? (y/n): ');
-  if (createAdmin.toLowerCase() !== 'y') {
-    console.log('⏭️  Skipping super admin creation\n');
-    return null;
-  }
+  console.log('This will create a system administrator account.');
+  console.log('Admins have FULL system access and can manage all users.\n');
+  console.log('ℹ️  Note: Doctors and workers should be created through the application.\n');
 
   // Collect inputs with defaults
-  let fullName = await question('Full name [Super Admin]: ');
-  fullName = fullName.trim() || 'Super Admin';
+  let fullName = await question('Full name [System Administrator]: ');
+  fullName = fullName.trim() || 'System Administrator';
 
   let email = await question('Email [admin@clinic.com]: ');
   email = email.trim() || 'admin@clinic.com';
@@ -102,27 +91,19 @@ async function createSuperAdmin() {
     return null;
   }
 
-  let specialty = await question('Specialty [Administrator]: ');
-  specialty = specialty.trim() || 'Administrator';
-
-  let color = await question('Color code [#FF6B6B]: ');
-  color = color.trim() || '#FF6B6B';
-
-  if (!validateColor(color)) {
-    console.log('❌ Invalid color code. Using default #FF6B6B');
-    color = '#FF6B6B';
-  }
+  let phone = await question('Phone number (optional): ');
+  phone = phone.trim() || null;
 
   try {
-    // Check if email already exists
+    // Check if email already exists in admins table
     const existing = await pool.query(
-      'SELECT doctor_id, full_name, email FROM doctors WHERE email = $1',
+      'SELECT admin_id, full_name, email FROM admins WHERE email = $1',
       [email]
     );
 
     if (existing.rows.length > 0) {
-      console.log('\n⚠️  A doctor account already exists with this email:');
-      console.log('   ID:', existing.rows[0].doctor_id);
+      console.log('\n⚠️  An admin account already exists with this email:');
+      console.log('   ID:', existing.rows[0].admin_id);
       console.log('   Name:', existing.rows[0].full_name);
       console.log('   Email:', existing.rows[0].email);
       console.log('\n   Skipping creation to prevent duplicates.\n');
@@ -133,144 +114,69 @@ async function createSuperAdmin() {
     console.log('\n🔄 Hashing password...');
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // Create super admin doctor
-    console.log('🔄 Creating super admin account...');
+    // Create admin account
+    console.log('🔄 Creating admin account...');
 
-    // Check if permissions column exists, if not use simpler insert
-    let insertQuery;
-    let insertParams;
+    const defaultPermissions = {
+      canApproveUsers: true,
+      canManageStaff: true,
+      canManageDoctors: true,
+      canManageWorkers: true,
+      canViewReports: true,
+      canAccessAllPages: true,
+      canManageSettings: true,
+      canManageTreatments: true,
+      canViewAuditLogs: true,
+      canManageBilling: true,
+      canManageClinics: true
+    };
 
-    try {
-      insertQuery = `
-        INSERT INTO doctors
-        (full_name, email, password_hash, specialty, color, status)
-        VALUES ($1, $2, $3, $4, $5, 'active')
-        RETURNING doctor_id
-      `;
-      insertParams = [fullName, email, passwordHash, specialty, color];
-
-      const result = await pool.query(insertQuery, insertParams);
-      const doctorId = result.rows[0].doctor_id;
-
-      // Assign to clinic 1
-      console.log('🔄 Assigning to clinic...');
-      await pool.query(
-        'INSERT INTO doctor_clinic_assignments (doctor_id, clinic_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-        [doctorId, 1]
-      );
-
-      console.log('\n✅ SUPER ADMIN CREATED SUCCESSFULLY!');
-      console.log('━'.repeat(70));
-      console.log('🆔 Doctor ID:', doctorId);
-      console.log('👤 Name:', fullName);
-      console.log('📧 Email:', email);
-      console.log('🔑 Password:', password);
-      console.log('🎨 Color:', color);
-      console.log('⚡ Specialty:', specialty);
-      console.log('🏥 Clinic:', 'Clinic 1 (Default)');
-      console.log('🔓 Permissions: FULL ACCESS (Doctor Dashboard + Admin Features)');
-      console.log('━'.repeat(70));
-
-      return {
-        id: doctorId,
-        type: 'super_admin',
-        name: fullName,
-        email: email,
-        password: password,
-        specialty: specialty,
-        color: color
-      };
-
-    } catch (error) {
-      console.error('❌ Error creating super admin:', error.message);
-      return null;
-    }
-
-  } catch (error) {
-    console.error('❌ Error in super admin creation:', error.message);
-    return null;
-  }
-}
-
-// Create Sample Worker Account
-async function createWorker() {
-  console.log('\n👔 WORKER ACCOUNT CREATION');
-  console.log('━'.repeat(70));
-  console.log('This will create a worker account for counter/reception staff.');
-  console.log('Workers have limited access (counter page only).\n');
-
-  const createWork = await question('Create sample worker account? (y/n): ');
-  if (createWork.toLowerCase() !== 'y') {
-    console.log('⏭️  Skipping worker creation\n');
-    return null;
-  }
-
-  let username = await question('Username [counter]: ');
-  username = username.trim() || 'counter';
-
-  let password = await question('Password [Counter@2025]: ');
-  password = password.trim() || 'Counter@2025';
-
-  const passwordCheck = validatePassword(password);
-  if (!passwordCheck.valid) {
-    console.log('❌', passwordCheck.error);
-    return null;
-  }
-
-  try {
-    // Check if username already exists
-    const existing = await pool.query(
-      'SELECT id, username FROM workers WHERE username = $1',
-      [username]
-    );
-
-    if (existing.rows.length > 0) {
-      console.log('\n⚠️  A worker account already exists with this username:');
-      console.log('   ID:', existing.rows[0].id);
-      console.log('   Username:', existing.rows[0].username);
-      console.log('\n   Skipping creation to prevent duplicates.\n');
-      return null;
-    }
-
-    // Hash password
-    console.log('\n🔄 Hashing password...');
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    // Create worker
-    console.log('🔄 Creating worker account...');
     const result = await pool.query(
-      'INSERT INTO workers (username, password_hash) VALUES ($1, $2) RETURNING id',
-      [username, passwordHash]
+      `INSERT INTO admins (full_name, email, password_hash, phone, permissions)
+       VALUES ($1, $2, $3, $4, $5) RETURNING admin_id`,
+      [fullName, email, passwordHash, phone, JSON.stringify(defaultPermissions)]
     );
 
-    const workerId = result.rows[0].id;
+    const adminId = result.rows[0].admin_id;
 
-    console.log('\n✅ WORKER CREATED SUCCESSFULLY!');
+    console.log('\n✅ ADMIN CREATED SUCCESSFULLY!');
     console.log('━'.repeat(70));
-    console.log('🆔 Worker ID:', workerId);
-    console.log('👤 Username:', username);
+    console.log('🆔 Admin ID:', adminId);
+    console.log('👤 Name:', fullName);
+    console.log('📧 Email:', email);
     console.log('🔑 Password:', password);
-    console.log('🔓 Access Level: Counter/Reception Page Only');
+    if (phone) console.log('📱 Phone:', phone);
+    console.log('🔓 Permissions: FULL SYSTEM ACCESS');
+    console.log('📊 Can manage: Doctors, Workers, Admins, Settings, Reports');
     console.log('━'.repeat(70));
 
     return {
-      id: workerId,
-      type: 'worker',
-      username: username,
-      password: password
+      id: adminId,
+      type: 'admin',
+      name: fullName,
+      email: email,
+      password: password,
+      phone: phone
     };
 
   } catch (error) {
-    console.error('❌ Error creating worker:', error.message);
+    console.error('❌ Error creating admin:', error.message);
+    if (error.message.includes('relation "admins" does not exist')) {
+      console.error('\n⚠️  The admins table does not exist yet.');
+      console.error('   Please run the SQL migration first:');
+      console.error('   backend/migrations/create_admins_table.sql\n');
+    }
     return null;
   }
 }
+
+// This function is removed - workers should be created through the application, not this script
 
 // Main execution
 async function main() {
   console.log('\n╔════════════════════════════════════════════════════════════════════╗');
   console.log('║                 CLINIC MANAGEMENT SYSTEM                           ║');
-  console.log('║                 Initial Account Setup Script                       ║');
+  console.log('║             System Administrator Account Setup                     ║');
   console.log('╚════════════════════════════════════════════════════════════════════╝');
 
   const createdAccounts = [];
@@ -281,15 +187,16 @@ async function main() {
     await pool.query('SELECT NOW()');
     console.log('✅ Database connected successfully!');
 
-    // Create accounts
-    const superAdmin = await createSuperAdmin();
-    if (superAdmin) {
-      createdAccounts.push(superAdmin);
-    }
+    // Create admin account (can create multiple if needed)
+    let createMore = true;
+    while (createMore) {
+      const admin = await createAdmin();
+      if (admin) {
+        createdAccounts.push(admin);
+      }
 
-    const worker = await createWorker();
-    if (worker) {
-      createdAccounts.push(worker);
+      const continueCreating = await question('\nCreate another admin account? (y/n): ');
+      createMore = continueCreating.toLowerCase() === 'y';
     }
 
     // Summary
@@ -298,25 +205,17 @@ async function main() {
       console.log('║                    ✅ SETUP COMPLETE!                              ║');
       console.log('╚════════════════════════════════════════════════════════════════════╝');
 
-      console.log('\n📋 CREATED ACCOUNTS SUMMARY:');
+      console.log('\n📋 CREATED ADMIN ACCOUNTS:');
       console.log('━'.repeat(70));
 
       createdAccounts.forEach((account, index) => {
-        console.log(`\n${index + 1}. ${account.type.toUpperCase()}`);
-        if (account.type === 'super_admin') {
-          console.log(`   🆔 ID: ${account.id}`);
-          console.log(`   👤 Name: ${account.name}`);
-          console.log(`   📧 Email: ${account.email}`);
-          console.log(`   🔑 Password: ${account.password}`);
-          console.log(`   ⚡ Specialty: ${account.specialty}`);
-          console.log(`   🎨 Color: ${account.color}`);
-          console.log(`   🔓 Access: FULL SYSTEM ACCESS`);
-        } else {
-          console.log(`   🆔 ID: ${account.id}`);
-          console.log(`   👤 Username: ${account.username}`);
-          console.log(`   🔑 Password: ${account.password}`);
-          console.log(`   🔓 Access: Counter Page Only`);
-        }
+        console.log(`\n${index + 1}. ADMIN ACCOUNT`);
+        console.log(`   🆔 ID: ${account.id}`);
+        console.log(`   👤 Name: ${account.name}`);
+        console.log(`   📧 Email: ${account.email}`);
+        console.log(`   🔑 Password: ${account.password}`);
+        if (account.phone) console.log(`   📱 Phone: ${account.phone}`);
+        console.log(`   🔓 Access: FULL SYSTEM ACCESS`);
       });
 
       console.log('\n━'.repeat(70));
@@ -324,16 +223,18 @@ async function main() {
       console.log('   • 🔐 Save these credentials in a secure location');
       console.log('   • 🔄 Change default passwords after first login');
       console.log('   • 🚫 Do NOT share credentials via insecure channels');
-      console.log('   • ✅ Super admin can access ALL pages and features');
-      console.log('   • 📊 Workers have limited access to counter operations only');
+      console.log('   • ✅ Admins can access ALL pages and manage all users');
+      console.log('   • 👨‍⚕️ Create doctors through the application, not this script');
+      console.log('   • 👔 Create workers through the application, not this script');
 
       console.log('\n🚀 NEXT STEPS:');
       console.log('   1. Go to your frontend application');
-      console.log('   2. Login with the credentials above');
-      console.log('   3. Change passwords immediately');
-      console.log('   4. Configure additional settings as needed');
+      console.log('   2. Login with the admin credentials above');
+      console.log('   3. Change password immediately after first login');
+      console.log('   4. Create doctors and workers through the application');
+      console.log('   5. Configure clinic settings as needed');
 
-      console.log('\n✨ Your clinic management system is ready to use!\n');
+      console.log('\n✨ Your admin account is ready to use!\n');
 
     } else {
       console.log('\n⚠️  No accounts were created.');
