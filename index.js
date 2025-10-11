@@ -9,6 +9,7 @@ const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const { format, addMonths, startOfMonth, getDay, eachDayOfInterval, addDays, endOfMonth, getWeekOfMonth } = require('date-fns');
 const db = require('./db');
+const { logAudit, logPatientAudit, logVisitAudit, logBillingAudit } = require('./utils/audit');
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -116,8 +117,8 @@ app.post('/api/login', loginLimiter, async (req, res) => {
             user = workerResult.rows[0];
             userRole = 'nurse';
         } else {
-            // Step 2: If not in 'workers', check the 'doctors_identities' table
-            const doctorResult = await db.query('SELECT doctor_id AS id, email AS username, password_hash FROM doctors_identities WHERE email = $1', [username.trim()]);
+            // Step 2: If not in 'workers', check the 'doctors' table
+            const doctorResult = await db.query('SELECT doctor_id AS id, email AS username, password_hash FROM doctors WHERE email = $1', [username.trim()]);
             if (doctorResult.rows.length > 0) {
                 user = doctorResult.rows[0];
                 userRole = 'doctor';
@@ -228,7 +229,7 @@ app.get('/api/doctors/unique', authMiddleware, async (req, res) => {
                 di.color,
                 di.email,
                 json_agg(json_build_object('id', c.clinic_id, 'name', c.name)) as clinics
-            FROM doctors_identities di
+            FROM doctors di
             JOIN doctor_clinic_assignments dca ON di.doctor_id = dca.doctor_id
             JOIN clinics c ON dca.clinic_id = c.clinic_id
             GROUP BY di.doctor_id
@@ -276,7 +277,7 @@ app.post('/api/doctors', authMiddleware, checkRole('nurse', 'admin'), async (req
         const salt = await bcrypt.genSalt(10);
         const passwordHash = await bcrypt.hash(password, salt);
         const identityResult = await client.query(
-            'INSERT INTO doctors_identities (full_name, specialty, email, password_hash, color, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING doctor_id',
+            'INSERT INTO doctors (full_name, specialty, email, password_hash, color, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING doctor_id',
             [fullName.trim(), specialty || null, email, passwordHash, color || null, status || 'active']
         );
         const newDoctorId = identityResult.rows[0].doctor_id;
@@ -341,12 +342,12 @@ app.put('/api/doctors/:id', authMiddleware, checkRole('nurse', 'admin'), async (
             const salt = await bcrypt.genSalt(10);
             passwordHash = await bcrypt.hash(password, salt);
             await client.query(
-                'UPDATE doctors_identities SET specialty = $1, email = $2, color = $3, status = $4, password_hash = $5 WHERE doctor_id = $6',
+                'UPDATE doctors SET specialty = $1, email = $2, color = $3, status = $4, password_hash = $5 WHERE doctor_id = $6',
                 [specialty, email, color, status, passwordHash, id]
             );
         } else {
              await client.query(
-                'UPDATE doctors_identities SET specialty = $1, email = $2, color = $3, status = $4 WHERE doctor_id = $5',
+                'UPDATE doctors SET specialty = $1, email = $2, color = $3, status = $4 WHERE doctor_id = $5',
                 [specialty, email, color, status, id]
             );
         }
@@ -484,12 +485,14 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
         // This query for working doctors is correct
         const workingDoctorsQuery = `
             WITH working_doctors AS (
-                SELECT da.doctor_id, da.start_time, da.end_time FROM doctor_availability da WHERE da.clinic_id = $1 AND da.day_of_week = $2
-                UNION
-                SELECT dr.doctor_id, dr.start_time, dr.end_time FROM doctor_availability_rules dr WHERE dr.clinic_id = $1 AND dr.day_of_week = $2 AND $3 = ANY(dr.weeks_of_month)
+                SELECT dr.doctor_id, dr.start_time, dr.end_time
+                FROM doctor_availability_rules dr
+                WHERE dr.clinic_id = $1
+                  AND dr.day_of_week = $2
+                  AND $3 = ANY(dr.weeks_of_month)
             )
             SELECT di.doctor_id AS id, di.full_name AS name, di.specialty, wd.start_time, wd.end_time
-            FROM doctors_identities di
+            FROM doctors di
             JOIN working_doctors wd ON di.doctor_id = wd.doctor_id
             WHERE di.status = 'active' AND di.doctor_id NOT IN (
                 SELECT ss.doctor_id FROM special_schedules ss WHERE ss.schedule_date = $4 AND ss.is_available = false
@@ -499,7 +502,7 @@ app.get('/api/clinic-day-schedule', authMiddleware, async (req, res) => {
 
         const { rows: allDoctors } = await db.query(
             `SELECT di.doctor_id AS id, di.full_name AS name 
-             FROM doctors_identities di
+             FROM doctors di
              JOIN doctor_clinic_assignments dca ON di.doctor_id = dca.doctor_id
              WHERE dca.clinic_id = $1 ORDER BY di.full_name`, [clinic_id]
         );
@@ -539,13 +542,13 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
              JOIN clinics c ON dca.clinic_id = c.clinic_id WHERE dca.doctor_id = $1`, [doctor_id]
         );
         
-        const availabilityResult = await db.query('SELECT clinic_id, day_of_week, start_time, end_time FROM doctor_availability WHERE doctor_id = $1', [doctor_id]);
+        // Only use doctor_availability_rules (old doctor_availability table was dropped)
         const rulesResult = await db.query('SELECT clinic_id, day_of_week, weeks_of_month, start_time, end_time FROM doctor_availability_rules WHERE doctor_id = $1', [doctor_id]);
         const specialSchedulesResult = await db.query('SELECT doctor_id, schedule_date, is_available FROM special_schedules WHERE doctor_id = $1', [doctor_id]);
 
         const scheduleMap = new Map();
         const startDate = new Date();
-        const endDate = addMonths(startDate, 2); 
+        const endDate = addMonths(startDate, 2);
 
         eachDayOfInterval({ start: startDate, end: endDate }).forEach(day => {
             const dayOfWeek = getDay(day);
@@ -554,15 +557,9 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
             let isWorking = false;
             let schedule = {};
 
-            const weeklyAvail = availabilityResult.rows.find(a => a.day_of_week === dayOfWeek);
-            if (weeklyAvail) {
-                isWorking = true;
-                const clinicInfo = doctorRecords.find(c => c.clinic_id === weeklyAvail.clinic_id);
-                schedule = { startTime: weeklyAvail.start_time, endTime: weeklyAvail.end_time, clinicId: clinicInfo.clinic_id, clinicName: clinicInfo.clinic_name };
-            }
-
+            // Check doctor_availability_rules
             const rule = rulesResult.rows.find(r => r.day_of_week === dayOfWeek && r.weeks_of_month.includes(weekOfMonth));
-             if (rule) {
+            if (rule) {
                 isWorking = true;
                 const clinicInfo = doctorRecords.find(c => c.clinic_id === rule.clinic_id);
                 schedule = { startTime: rule.start_time, endTime: rule.end_time, clinicId: clinicInfo.clinic_id, clinicName: clinicInfo.clinic_name };
@@ -591,11 +588,12 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const doctor_id = parseInt(req.params.doctor_id);
     try {
+        // Use doctor_availability_rules (old doctor_availability table was dropped)
         const { rows } = await db.query(
-            `SELECT da.id, da.day_of_week, da.start_time, da.end_time, da.clinic_id, c.name as clinic_name
-             FROM doctor_availability da 
-             JOIN clinics c ON da.clinic_id = c.clinic_id
-             WHERE da.doctor_id = $1`,
+            `SELECT dar.id, dar.day_of_week, dar.weeks_of_month, dar.start_time, dar.end_time, dar.clinic_id, c.name as clinic_name
+             FROM doctor_availability_rules dar
+             JOIN clinics c ON dar.clinic_id = c.clinic_id
+             WHERE dar.doctor_id = $1`,
             [doctor_id]
         );
         res.json(rows);
@@ -617,15 +615,16 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
 
     const slot = availability[0];
 
-    // Validation: Check if slot has required fields
-    if (!slot.clinic_id || slot.day_of_week === undefined || !slot.start_time || !slot.end_time) {
-        return res.status(400).json({ message: 'Missing required fields: clinic_id, day_of_week, start_time, end_time' });
+    // Validation: Check if slot has required fields (now requires weeks_of_month for rules table)
+    if (!slot.clinic_id || slot.day_of_week === undefined || !slot.start_time || !slot.end_time || !slot.weeks_of_month) {
+        return res.status(400).json({ message: 'Missing required fields: clinic_id, day_of_week, weeks_of_month, start_time, end_time' });
     }
 
     try {
+        // Use doctor_availability_rules (old doctor_availability table was dropped)
         await db.query(
-            'INSERT INTO doctor_availability (doctor_id, clinic_id, day_of_week, start_time, end_time) VALUES ($1, $2, $3, $4, $5)',
-            [doctor_id, slot.clinic_id, slot.day_of_week, slot.start_time, slot.end_time]
+            'INSERT INTO doctor_availability_rules (doctor_id, clinic_id, day_of_week, weeks_of_month, start_time, end_time) VALUES ($1, $2, $3, $4, $5, $6)',
+            [doctor_id, slot.clinic_id, slot.day_of_week, slot.weeks_of_month, slot.start_time, slot.end_time]
         );
         res.status(201).send({ message: 'Availability added successfully' });
     } catch (err) {
@@ -699,7 +698,7 @@ app.get('/api/pending-appointments', authMiddleware, async (req, res) => {
                 di.full_name AS doctor_name,
                 r.room_name
             FROM appointments a
-            JOIN doctors_identities di ON a.doctor_id = di.doctor_id
+            JOIN doctors di ON a.doctor_id = di.doctor_id
             LEFT JOIN patients p ON a.patient_id = p.patient_id
             LEFT JOIN customers c ON a.customer_id = c.customer_id
             LEFT JOIN rooms r ON a.room_id = r.room_id
@@ -729,7 +728,7 @@ app.get('/api/all-appointments', authMiddleware, async (req, res) => {
                 COALESCE(a.patient_name_at_booking, c.display_name, 'Unknown Patient') as patient_name,
                 di.full_name as doctor_name
             FROM appointments a
-            JOIN doctors_identities di ON a.doctor_id = di.doctor_id
+            JOIN doctors di ON a.doctor_id = di.doctor_id
             LEFT JOIN customers c ON a.customer_id = c.customer_id
             WHERE a.clinic_id = $1 AND DATE(a.appointment_time) BETWEEN $2 AND $3
             ORDER BY a.appointment_time
@@ -884,7 +883,7 @@ app.get('/api/confirmed-appointments', authMiddleware, async (req, res) => {
                    COALESCE(a.patient_phone_at_booking, c.phone_number, 'N/A') as phone_number,
                    di.full_name as doctor_name
             FROM appointments a 
-            JOIN doctors_identities di ON a.doctor_id = di.doctor_id
+            JOIN doctors di ON a.doctor_id = di.doctor_id
             LEFT JOIN customers c ON a.customer_id = c.customer_id
             WHERE a.clinic_id = $1 AND LOWER(a.status) = 'confirmed' AND DATE(a.appointment_time) BETWEEN $2 AND $3
             ORDER BY a.appointment_time
@@ -1369,7 +1368,7 @@ app.get('/api/debug/checked-in-appointments', authMiddleware, async (req, res) =
                     di.full_name as doctor_name
              FROM appointments a
              JOIN patients p ON a.patient_id = p.patient_id
-             LEFT JOIN doctors_identities di ON a.doctor_id = di.doctor_id
+             LEFT JOIN doctors di ON a.doctor_id = di.doctor_id
              WHERE LOWER(a.status) = 'checked-in'
                ${clinic_id ? 'AND a.clinic_id = $1' : ''}
              ORDER BY a.check_in_time DESC`,
@@ -1436,7 +1435,7 @@ app.get('/api/visits', authMiddleware, async (req, res) => {
                    b.payment_status
             FROM visits v
             JOIN patients p ON v.patient_id = p.patient_id
-            LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+            LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
             LEFT JOIN billing b ON v.visit_id = b.visit_id
             WHERE v.clinic_id = $1`;
 
@@ -1473,7 +1472,7 @@ app.get('/api/visits/queue', authMiddleware, async (req, res) => {
                     di.full_name as doctor_name
              FROM visits v
              JOIN patients p ON v.patient_id = p.patient_id
-             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
              WHERE v.clinic_id = $1 AND v.status = 'waiting'
              ORDER BY v.waiting_alert_level DESC NULLS LAST, v.check_in_time ASC`,
             [clinic_id]
@@ -1600,7 +1599,7 @@ app.get('/api/visits/:id', authMiddleware, async (req, res) => {
                     di.full_name as doctor_name, di.specialty
              FROM visits v
              JOIN patients p ON v.patient_id = p.patient_id
-             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
              WHERE v.visit_id = $1`,
             [id]
         );
@@ -1658,7 +1657,7 @@ app.put('/api/visits/:id/checkout', authMiddleware, async (req, res) => {
 
             const doctorId = parseInt(req.user.id);
             const doctorCheck = await db.query(
-                'SELECT password_hash FROM doctors_identities WHERE doctor_id = $1',
+                'SELECT password_hash FROM doctors WHERE doctor_id = $1',
                 [doctorId]
             );
 
@@ -1669,7 +1668,8 @@ app.put('/api/visits/:id/checkout', authMiddleware, async (req, res) => {
             const passwordMatch = await bcrypt.compare(password, doctorCheck.rows[0].password_hash);
 
             if (!passwordMatch) {
-                return res.status(401).json({ message: 'Incorrect password' });
+                // Don't log out user, just return error
+                return res.status(401).json({ message: 'Incorrect password. Please try again.' });
             }
         }
 
@@ -1680,8 +1680,18 @@ app.put('/api/visits/:id/checkout', authMiddleware, async (req, res) => {
             }
         }
 
-        // Update visit status
+        // Get old visit data for audit
         const visitId = parseInt(id);
+        const oldVisitData = await db.query('SELECT * FROM visits WHERE visit_id = $1', [visitId]);
+
+        if (oldVisitData.rows.length === 0) {
+            return res.status(404).json({ message: 'Visit not found' });
+        }
+
+        // Start transaction for payment processing
+        await db.query('BEGIN');
+
+        // Update visit status
         const { rows: visitRows } = await db.query(
             `UPDATE visits
              SET status = $1::text, check_out_time = CASE WHEN $1::text = 'completed' THEN NOW() ELSE check_out_time END
@@ -1690,11 +1700,18 @@ app.put('/api/visits/:id/checkout', authMiddleware, async (req, res) => {
             [status, visitId]
         );
 
-        if (visitRows.length === 0) {
-            return res.status(404).json({ message: 'Visit not found' });
-        }
+        // Log visit checkout audit
+        await logVisitAudit(
+            req.user.id,
+            userRole,
+            'checkout_visit',
+            visitId,
+            { status: oldVisitData.rows[0].status },
+            { status: visitRows[0].status, check_out_time: visitRows[0].check_out_time },
+            req
+        );
 
-        // If completing payment, update or create billing record
+        // If completing payment, update or create billing record AND payment transaction
         if (status === 'completed' && payment_method) {
             // Calculate total from visit treatments
             const totalCalc = await db.query(
@@ -1704,6 +1721,7 @@ app.put('/api/visits/:id/checkout', authMiddleware, async (req, res) => {
                 [visitId]
             );
             const totalAmount = parseFloat(totalCalc.rows[0].total);
+            const finalAmount = amount_paid || totalAmount;
 
             // Check if billing record exists
             const billingCheck = await db.query(
@@ -1711,31 +1729,68 @@ app.put('/api/visits/:id/checkout', authMiddleware, async (req, res) => {
                 [visitId]
             );
 
+            let billingId;
+
             if (billingCheck.rows.length > 0) {
                 // Update existing billing record
+                billingId = billingCheck.rows[0].billing_id;
+                const oldBillingData = await db.query('SELECT * FROM billing WHERE billing_id = $1', [billingId]);
+
                 await db.query(
                     `UPDATE billing
                      SET payment_status = 'paid',
                          payment_method = $1,
-                         amount_paid = $2,
-                         transaction_ref = $3,
-                         paid_at = NOW(),
-                         processed_by = $4
-                     WHERE visit_id = $5`,
-                    [payment_method, amount_paid || totalAmount, transaction_ref, req.user.id, visitId]
+                         paid_at = NOW()
+                     WHERE billing_id = $2`,
+                    [payment_method, billingId]
+                );
+
+                // Log billing audit
+                await logBillingAudit(
+                    req.user.id,
+                    userRole,
+                    'process_payment',
+                    billingId,
+                    oldBillingData.rows[0],
+                    { payment_status: 'paid', payment_method, paid_at: new Date() },
+                    req
                 );
             } else {
                 // Create new billing record
-                await db.query(
-                    `INSERT INTO billing (visit_id, total_amount, payment_status, payment_method, amount_paid, transaction_ref, paid_at, processed_by)
-                     VALUES ($1, $2, 'paid', $3, $4, $5, NOW(), $6)`,
-                    [visitId, totalAmount, payment_method, amount_paid || totalAmount, transaction_ref, req.user.id]
+                const billingResult = await db.query(
+                    `INSERT INTO billing (visit_id, total_amount, payment_status, payment_method, paid_at)
+                     VALUES ($1, $2, 'paid', $3, NOW())
+                     RETURNING billing_id`,
+                    [visitId, totalAmount, payment_method]
+                );
+                billingId = billingResult.rows[0].billing_id;
+
+                // Log billing creation audit
+                await logBillingAudit(
+                    req.user.id,
+                    userRole,
+                    'create_billing',
+                    billingId,
+                    null,
+                    { visit_id: visitId, total_amount: totalAmount, payment_status: 'paid', payment_method },
+                    req
                 );
             }
+
+            // Create payment transaction record
+            await db.query(
+                `INSERT INTO payment_transactions
+                 (billing_id, amount, payment_method, transaction_reference, processed_by, transaction_date)
+                 VALUES ($1, $2, $3, $4, $5, NOW())`,
+                [billingId, finalAmount, payment_method, transaction_ref || null, req.user.id]
+            );
         }
+
+        await db.query('COMMIT');
 
         res.json(visitRows[0]);
     } catch (err) {
+        await db.query('ROLLBACK');
         handleError(res, err, 'Failed to checkout visit');
     }
 });
@@ -1803,7 +1858,7 @@ app.get('/api/examinations/visit/:visit_id', authMiddleware, async (req, res) =>
              FROM examination_findings ef
              JOIN visits v ON ef.visit_id = v.visit_id
              JOIN patients p ON v.patient_id = p.patient_id
-             JOIN doctors_identities di ON ef.doctor_id = di.doctor_id
+             JOIN doctors di ON ef.doctor_id = di.doctor_id
              WHERE ef.visit_id = $1`,
             [visit_id]
         );
@@ -1874,7 +1929,7 @@ app.get('/api/examinations/:id', authMiddleware, async (req, res) => {
              FROM examination_findings ef
              JOIN visits v ON ef.visit_id = v.visit_id
              JOIN patients p ON v.patient_id = p.patient_id
-             JOIN doctors_identities di ON ef.doctor_id = di.doctor_id
+             JOIN doctors di ON ef.doctor_id = di.doctor_id
              WHERE ef.finding_id = $1`,
             [id]
         );
@@ -1943,7 +1998,7 @@ app.get('/api/treatment-plans/visit/:visit_id', authMiddleware, async (req, res)
                     di.full_name as doctor_name,
                     p.first_name_th, p.last_name_th
              FROM treatment_plans tp
-             JOIN doctors_identities di ON tp.doctor_id = di.doctor_id
+             JOIN doctors di ON tp.doctor_id = di.doctor_id
              JOIN patients p ON tp.patient_id = p.patient_id
              WHERE tp.visit_id = $1`,
             [visit_id]
@@ -1968,7 +2023,7 @@ app.get('/api/treatment-plans/patient/:patient_id', authMiddleware, async (req, 
             `SELECT tp.*,
                     di.full_name as doctor_name
              FROM treatment_plans tp
-             LEFT JOIN doctors_identities di ON tp.doctor_id = di.doctor_id
+             LEFT JOIN doctors di ON tp.doctor_id = di.doctor_id
              WHERE tp.patient_id = $1
              ORDER BY tp.plan_date DESC, tp.created_at DESC`,
             [patient_id]
@@ -2109,7 +2164,7 @@ app.get('/api/visits/:id/treatments', authMiddleware, async (req, res) => {
              FROM visit_treatments vt
              JOIN treatments t ON vt.treatment_id = t.treatment_id
              JOIN visits v ON vt.visit_id = v.visit_id
-             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
              WHERE vt.visit_id = $1
              ORDER BY vt.visit_treatment_id`,
             [visit_id]
@@ -2135,7 +2190,7 @@ app.get('/api/visit-treatments/visit/:visit_id', authMiddleware, async (req, res
              FROM visit_treatments vt
              JOIN treatments t ON vt.treatment_id = t.treatment_id
              JOIN visits v ON vt.visit_id = v.visit_id
-             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
              WHERE vt.visit_id = $1
              ORDER BY vt.visit_treatment_id`, // <-- FIX IS HERE
             [visit_id]
@@ -2417,7 +2472,7 @@ app.get('/api/billing/:id', authMiddleware, async (req, res) => {
              FROM billing b
              JOIN visits v ON b.visit_id = v.visit_id
              JOIN patients p ON b.patient_id = p.patient_id
-             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
              WHERE b.billing_id = $1`,
             [id]
         );
@@ -2659,7 +2714,7 @@ app.get('/api/history/patient/:patient_id', authMiddleware, async (req, res) => 
                 b.payment_method,
                 b.payment_status
              FROM visits v
-             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
              LEFT JOIN examination_findings ef ON v.visit_id = ef.visit_id
              LEFT JOIN billing b ON v.visit_id = b.visit_id
              WHERE v.patient_id = $1 AND v.status IN ('completed', 'checked-out')
@@ -2718,7 +2773,7 @@ app.get('/api/history/visit/:visit_id/pdf', authMiddleware, async (req, res) => 
                 c.name as clinic_name
              FROM visits v
              JOIN patients p ON v.patient_id = p.patient_id
-             LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
              JOIN clinics c ON v.clinic_id = c.clinic_id
              WHERE v.visit_id = $1`,
             [visit_id]
@@ -2822,7 +2877,7 @@ app.get('/api/reports/daily-summary', authMiddleware, checkRole('admin'), async 
                     COUNT(v.visit_id) as total_visits,
                     COUNT(CASE WHEN v.status = 'completed' THEN 1 END) as completed_visits
              FROM visits v
-             JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+             JOIN doctors di ON v.doctor_id = di.doctor_id
              WHERE v.clinic_id = $1 AND DATE(v.check_in_time) = $2
              GROUP BY di.doctor_id, di.full_name
              ORDER BY total_visits DESC`,
@@ -2944,7 +2999,7 @@ app.get('/api/operations/patient-log', authMiddleware, async (req, res) => {
                 b.amount_paid
             FROM visits v
             JOIN patients p ON v.patient_id = p.patient_id
-            LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+            LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
             LEFT JOIN billing b ON v.visit_id = b.visit_id
             WHERE v.clinic_id = $1
             AND DATE(v.check_in_time) BETWEEN $2 AND $3
@@ -2983,7 +3038,7 @@ app.get('/api/operations/export', authMiddleware, async (req, res) => {
                     b.payment_status as "Payment Status"
                 FROM visits v
                 JOIN patients p ON v.patient_id = p.patient_id
-                LEFT JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+                LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
                 LEFT JOIN billing b ON v.visit_id = b.visit_id
                 WHERE v.clinic_id = $1
                 AND DATE(v.check_in_time) BETWEEN $2 AND $3
@@ -3216,7 +3271,7 @@ app.get('/api/billing/payroll-report', authMiddleware, async (req, res) => {
             JOIN visits v ON vt.visit_id = v.visit_id
             JOIN treatments t ON vt.treatment_id = t.treatment_id
             JOIN patients p ON v.patient_id = p.patient_id
-            JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+            JOIN doctors di ON v.doctor_id = di.doctor_id
             WHERE v.clinic_id = $1
             AND DATE(v.check_in_time) BETWEEN $2 AND $3
             ${doctorFilter}
@@ -3338,7 +3393,7 @@ app.get('/api/billing/export-excel', authMiddleware, async (req, res) => {
             JOIN visits v ON vt.visit_id = v.visit_id
             JOIN treatments t ON vt.treatment_id = t.treatment_id
             JOIN patients p ON v.patient_id = p.patient_id
-            JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+            JOIN doctors di ON v.doctor_id = di.doctor_id
             WHERE v.clinic_id = $1
             AND DATE(v.check_in_time) BETWEEN $2 AND $3
             ${doctorFilter}
@@ -3503,7 +3558,7 @@ app.get('/api/billing/doctor-summaries-pdf', authMiddleware, async (req, res) =>
             JOIN visits v ON vt.visit_id = v.visit_id
             JOIN treatments t ON vt.treatment_id = t.treatment_id
             JOIN patients p ON v.patient_id = p.patient_id
-            JOIN doctors_identities di ON v.doctor_id = di.doctor_id
+            JOIN doctors di ON v.doctor_id = di.doctor_id
             WHERE v.clinic_id = $1
             AND DATE(v.check_in_time) BETWEEN $2 AND $3
             ${doctorFilter}
@@ -3650,6 +3705,212 @@ app.get('/api/billing/doctor-summaries-pdf', authMiddleware, async (req, res) =>
         res.send(html);
     } catch (err) {
         handleError(res, err, 'Failed to generate doctor summaries PDF');
+    }
+});
+
+// =====================================================================
+// NEW ENDPOINTS: AUDIT LOGS, NOTIFICATIONS, PAYMENT TRANSACTIONS
+// =====================================================================
+
+// GET audit logs (admin only) - view audit history
+app.get('/api/audit-logs', authMiddleware, checkRole('admin'), async (req, res) => {
+    try {
+        const { limit = 100, offset = 0, user_type, action, table_name } = req.query;
+
+        let query = 'SELECT * FROM audit_logs WHERE 1=1';
+        const params = [];
+        let paramCount = 1;
+
+        if (user_type) {
+            query += ` AND user_type = $${paramCount}`;
+            params.push(user_type);
+            paramCount++;
+        }
+
+        if (action) {
+            query += ` AND action = $${paramCount}`;
+            params.push(action);
+            paramCount++;
+        }
+
+        if (table_name) {
+            query += ` AND table_name = $${paramCount}`;
+            params.push(table_name);
+            paramCount++;
+        }
+
+        query += ` ORDER BY created_at DESC LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
+        params.push(parseInt(limit), parseInt(offset));
+
+        const result = await db.query(query, params);
+
+        res.json({ success: true, data: result.rows, count: result.rows.length });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch audit logs');
+    }
+});
+
+// GET notifications for current user
+app.get('/api/notifications', authMiddleware, async (req, res) => {
+    try {
+        const userId = parseInt(req.user.id);
+        const userType = req.user.role;
+
+        const result = await db.query(
+            `SELECT * FROM notifications
+             WHERE user_id = $1 AND user_type = $2
+             ORDER BY created_at DESC
+             LIMIT 50`,
+            [userId, userType]
+        );
+
+        res.json({ success: true, data: result.rows });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch notifications');
+    }
+});
+
+// PUT mark notification as read
+app.put('/api/notifications/:id/read', authMiddleware, async (req, res) => {
+    try {
+        const notificationId = parseInt(req.params.id);
+        const userId = parseInt(req.user.id);
+
+        const result = await db.query(
+            `UPDATE notifications
+             SET is_read = TRUE
+             WHERE notification_id = $1 AND user_id = $2
+             RETURNING *`,
+            [notificationId, userId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Notification not found' });
+        }
+
+        res.json({ success: true, data: result.rows[0] });
+    } catch (err) {
+        handleError(res, err, 'Failed to mark notification as read');
+    }
+});
+
+// GET payment transaction history for a billing record
+app.get('/api/payment-transactions/:billingId', authMiddleware, async (req, res) => {
+    try {
+        const billingId = parseInt(req.params.billingId);
+
+        const result = await db.query(
+            `SELECT pt.*, w.username as processed_by_name
+             FROM payment_transactions pt
+             LEFT JOIN workers w ON pt.processed_by = w.id
+             WHERE pt.billing_id = $1
+             ORDER BY pt.transaction_date DESC`,
+            [billingId]
+        );
+
+        res.json({ success: true, data: result.rows });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch payment transactions');
+    }
+});
+
+// =====================================================================
+// OPTIMIZED ENDPOINTS USING DATABASE VIEWS
+// =====================================================================
+
+// GET waiting queue using optimized view
+app.get('/api/visits/queue-view', authMiddleware, async (req, res) => {
+    try {
+        const { doctor_id, clinic_id } = req.query;
+
+        let query = 'SELECT * FROM v_waiting_queue WHERE 1=1';
+        const params = [];
+        let paramCount = 1;
+
+        if (doctor_id) {
+            query += ` AND doctor_id = $${paramCount}`;
+            params.push(parseInt(doctor_id));
+            paramCount++;
+        }
+
+        if (clinic_id) {
+            query += ` AND clinic_id = $${paramCount}`;
+            params.push(parseInt(clinic_id));
+            paramCount++;
+        }
+
+        query += ' ORDER BY check_in_time ASC';
+
+        const result = await db.query(query, params);
+
+        res.json({ success: true, data: result.rows });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch waiting queue');
+    }
+});
+
+// GET pending bills using optimized view
+app.get('/api/billing/pending-view', authMiddleware, async (req, res) => {
+    try {
+        const result = await db.query('SELECT * FROM v_pending_bills ORDER BY check_out_time DESC');
+
+        res.json({ success: true, data: result.rows });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch pending bills');
+    }
+});
+
+// GET today's appointments using optimized view
+app.get('/api/appointments/today-view', authMiddleware, async (req, res) => {
+    try {
+        const { doctor_id, clinic_id } = req.query;
+
+        let query = 'SELECT * FROM v_today_appointments WHERE 1=1';
+        const params = [];
+        let paramCount = 1;
+
+        if (doctor_id) {
+            query += ` AND doctor_id = $${paramCount}`;
+            params.push(parseInt(doctor_id));
+            paramCount++;
+        }
+
+        if (clinic_id) {
+            query += ` AND clinic_id = $${paramCount}`;
+            params.push(parseInt(clinic_id));
+            paramCount++;
+        }
+
+        query += ' ORDER BY appointment_time ASC';
+
+        const result = await db.query(query, params);
+
+        res.json({ success: true, data: result.rows });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch today\'s appointments');
+    }
+});
+
+// GET patient age using database function
+app.get('/api/patients/:id/age', authMiddleware, async (req, res) => {
+    try {
+        const patientId = parseInt(req.params.id);
+
+        const result = await db.query(
+            `SELECT patient_id, first_name_th, last_name_th, date_of_birth,
+                    calculate_age(date_of_birth) as age
+             FROM patients
+             WHERE patient_id = $1`,
+            [patientId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Patient not found' });
+        }
+
+        res.json({ success: true, data: result.rows[0] });
+    } catch (err) {
+        handleError(res, err, 'Failed to calculate patient age');
     }
 });
 
