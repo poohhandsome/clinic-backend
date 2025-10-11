@@ -118,7 +118,11 @@ app.post('/api/login', loginLimiter, async (req, res) => {
             userRole = 'nurse';
         } else {
             // Step 2: If not in 'workers', check the 'doctors' table
-            const doctorResult = await db.query('SELECT doctor_id AS id, email AS username, password_hash FROM doctors WHERE email = $1', [username.trim()]);
+            // Include full_name and status for super admin identification
+            const doctorResult = await db.query(
+                'SELECT doctor_id AS id, email AS username, password_hash, full_name, status FROM doctors WHERE email = $1',
+                [username.trim()]
+            );
             if (doctorResult.rows.length > 0) {
                 user = doctorResult.rows[0];
                 userRole = 'doctor';
@@ -129,20 +133,33 @@ app.post('/api/login', loginLimiter, async (req, res) => {
         if (!user) {
             return res.status(400).json({ msg: 'Invalid credentials' });
         }
-        
+
         // Step 4: Compare the password
         const isMatch = await bcrypt.compare(password, user.password_hash);
         if (!isMatch) {
             return res.status(400).json({ msg: 'Invalid credentials' });
         }
 
-        // Step 5: Create a token with the user's ID, username, and role
-        const payload = { 
-            user: { 
-                id: user.id, 
+        // Step 5: Check if doctor is super admin (full system access)
+        // Super admin criteria: email contains "admin" OR full_name contains "Super Admin" OR "Administrator"
+        let isSuperAdmin = false;
+        if (userRole === 'doctor') {
+            const email = user.username.toLowerCase();
+            const name = (user.full_name || '').toLowerCase();
+            isSuperAdmin = email.includes('admin') ||
+                          name.includes('super admin') ||
+                          name.includes('administrator');
+        }
+
+        // Step 6: Create a token with the user's ID, username, role, and super admin status
+        const payload = {
+            user: {
+                id: user.id,
                 username: user.username,
-                role: userRole 
-            } 
+                role: userRole,
+                isSuperAdmin: isSuperAdmin,
+                fullName: user.full_name || user.username
+            }
         };
 
         jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '12h' }, (err, token) => {
