@@ -3193,12 +3193,12 @@ app.get('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
     }
 
     try {
-        // Check if compensation_rules table exists
+        // Check if compensation_rule table exists
         const tableCheck = await db.query(`
             SELECT EXISTS (
                 SELECT FROM information_schema.tables
                 WHERE table_schema = 'public'
-                AND table_name = 'compensation_rules'
+                AND table_name = 'compensation_rule'
             );
         `);
 
@@ -3212,7 +3212,7 @@ app.get('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
 
         // Get default rule
         const defaultRule = await db.query(
-            `SELECT value FROM compensation_rules
+            `SELECT value FROM compensation_rule
              WHERE clinic_id = $1 AND rule_type = 'default'
              LIMIT 1`,
             [clinic_id]
@@ -3221,7 +3221,7 @@ app.get('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
         // Get procedure-specific rules
         const procedureRules = await db.query(
             `SELECT rule_id, treatment_id, rule_type, value
-             FROM compensation_rules
+             FROM compensation_rule
              WHERE clinic_id = $1 AND rule_type != 'default'
              ORDER BY rule_id`,
             [clinic_id]
@@ -3252,13 +3252,13 @@ app.put('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
 
         // Delete existing rules for this clinic
         await client.query(
-            'DELETE FROM compensation_rules WHERE clinic_id = $1',
+            'DELETE FROM compensation_rule WHERE clinic_id = $1',
             [clinic_id]
         );
 
         // Insert default rule
         await client.query(
-            `INSERT INTO compensation_rules (clinic_id, treatment_id, rule_type, value)
+            `INSERT INTO compensation_rule (clinic_id, treatment_id, rule_type, value)
              VALUES ($1, NULL, 'default', $2)`,
             [clinic_id, defaultRate]
         );
@@ -3267,7 +3267,7 @@ app.put('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
         for (const rule of procedureRules) {
             if (rule.treatment_id) {
                 await client.query(
-                    `INSERT INTO compensation_rules (clinic_id, treatment_id, rule_type, value)
+                    `INSERT INTO compensation_rule (clinic_id, treatment_id, rule_type, value)
                      VALUES ($1, $2, $3, $4)`,
                     [clinic_id, rule.treatment_id, rule.rule_type, rule.value]
                 );
