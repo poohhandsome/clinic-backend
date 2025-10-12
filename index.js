@@ -111,25 +111,39 @@ app.post('/api/login', loginLimiter, async (req, res) => {
         let user = null;
         let userRole = '';
 
-        // Step 1: Check the 'workers' table
-        const workerResult = await db.query('SELECT id, username, password_hash FROM workers WHERE username = $1', [username.trim()]);
-        if (workerResult.rows.length > 0) {
-            user = workerResult.rows[0];
-            userRole = 'nurse';
-        } else {
-            // Step 2: If not in 'workers', check the 'doctors' table
-            // Include full_name and status for super admin identification
-            const doctorResult = await db.query(
-                'SELECT doctor_id AS id, email AS username, password_hash, full_name, status FROM doctors WHERE email = $1',
-                [username.trim()]
+        // Check if it's an email (admins and doctors use email)
+        const isEmail = username.trim().includes('@');
+
+        if (isEmail) {
+            // Step 1: Check the 'admins' table first (highest priority)
+            const adminResult = await db.query(
+                'SELECT admin_id AS id, email AS username, password_hash, full_name, status, permissions FROM admins WHERE email = $1 AND status = $2',
+                [username.trim(), 'active']
             );
-            if (doctorResult.rows.length > 0) {
-                user = doctorResult.rows[0];
-                userRole = 'doctor';
+            if (adminResult.rows.length > 0) {
+                user = adminResult.rows[0];
+                userRole = 'admin';
+            } else {
+                // Step 2: If not admin, check the 'doctors' table
+                const doctorResult = await db.query(
+                    'SELECT doctor_id AS id, email AS username, password_hash, full_name, status FROM doctors WHERE email = $1 AND status = $2 AND is_archived = FALSE',
+                    [username.trim(), 'active']
+                );
+                if (doctorResult.rows.length > 0) {
+                    user = doctorResult.rows[0];
+                    userRole = 'doctor';
+                }
+            }
+        } else {
+            // Step 3: It's a username - check the 'workers' table
+            const workerResult = await db.query('SELECT id, username, password_hash FROM workers WHERE username = $1', [username.trim()]);
+            if (workerResult.rows.length > 0) {
+                user = workerResult.rows[0];
+                userRole = 'nurse';
             }
         }
 
-        // Step 3: If user is still null, they don't exist
+        // Step 4: If user is still null, they don't exist
         if (!user) {
             return res.status(400).json({ msg: 'Invalid credentials' });
         }
@@ -140,10 +154,14 @@ app.post('/api/login', loginLimiter, async (req, res) => {
             return res.status(400).json({ msg: 'Invalid credentials' });
         }
 
-        // Step 5: Check if doctor is super admin (full system access)
-        // Super admin criteria: email contains "admin" OR full_name contains "Super Admin" OR "Administrator"
+        // Step 5: Check if user has super admin access (full system access)
+        // Super admin criteria:
+        // 1. User from admins table (always super admin)
+        // 2. Doctor with email containing "admin" OR name containing "Super Admin" OR "Administrator"
         let isSuperAdmin = false;
-        if (userRole === 'doctor') {
+        if (userRole === 'admin') {
+            isSuperAdmin = true; // All admins have super admin access
+        } else if (userRole === 'doctor') {
             const email = user.username.toLowerCase();
             const name = (user.full_name || '').toLowerCase();
             isSuperAdmin = email.includes('admin') ||
@@ -157,8 +175,10 @@ app.post('/api/login', loginLimiter, async (req, res) => {
                 id: user.id,
                 username: user.username,
                 role: userRole,
+                userType: userRole, // Add userType for consistency with new auth
                 isSuperAdmin: isSuperAdmin,
-                fullName: user.full_name || user.username
+                fullName: user.full_name || user.username,
+                permissions: user.permissions || null
             }
         };
 
