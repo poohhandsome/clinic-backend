@@ -624,37 +624,48 @@ app.get('/api/doctor-work-schedule/:doctor_id', authMiddleware, async (req, res)
 
 app.get('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const doctor_id = parseInt(req.params.doctor_id);
+
+    if (isNaN(doctor_id)) {
+        return res.status(400).json({ success: false, error: 'Invalid doctor ID' });
+    }
+
     try {
         // Use doctor_availability_rules (old doctor_availability table was dropped)
         const { rows } = await db.query(
             `SELECT dar.id, dar.day_of_week, dar.weeks_of_month, dar.start_time, dar.end_time, dar.clinic_id, c.name as clinic_name
              FROM doctor_availability_rules dar
              JOIN clinics c ON dar.clinic_id = c.clinic_id
-             WHERE dar.doctor_id = $1`,
+             WHERE dar.doctor_id = $1
+             ORDER BY dar.day_of_week, dar.start_time`,
             [doctor_id]
         );
-        res.json(rows);
+        res.json({ success: true, data: rows });
     } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ message: 'Server Error' });
+        console.error('Get doctor availability error:', err.message);
+        res.status(500).json({ success: false, error: 'Failed to fetch doctor availability' });
     }
 });
 
 
 app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res) => {
     const doctor_id = parseInt(req.params.doctor_id);
+
+    if (isNaN(doctor_id)) {
+        return res.status(400).json({ success: false, error: 'Invalid doctor ID' });
+    }
+
     const { availability } = req.body; // Expects an array with a single schedule object
 
     // Validation: Check if availability is a valid non-empty array
     if (!availability || !Array.isArray(availability) || availability.length === 0) {
-        return res.status(400).json({ message: 'Availability data is required and must be a non-empty array' });
+        return res.status(400).json({ success: false, error: 'Availability data is required and must be a non-empty array' });
     }
 
     const slot = availability[0];
 
     // Validation: Check if slot has required fields (now requires weeks_of_month for rules table)
     if (!slot.clinic_id || slot.day_of_week === undefined || !slot.start_time || !slot.end_time || !slot.weeks_of_month) {
-        return res.status(400).json({ message: 'Missing required fields: clinic_id, day_of_week, weeks_of_month, start_time, end_time' });
+        return res.status(400).json({ success: false, error: 'Missing required fields: clinic_id, day_of_week, weeks_of_month, start_time, end_time' });
     }
 
     try {
@@ -663,10 +674,10 @@ app.post('/api/doctor-availability/:doctor_id', authMiddleware, async (req, res)
             'INSERT INTO doctor_availability_rules (doctor_id, clinic_id, day_of_week, weeks_of_month, start_time, end_time) VALUES ($1, $2, $3, $4, $5, $6)',
             [doctor_id, slot.clinic_id, slot.day_of_week, slot.weeks_of_month, slot.start_time, slot.end_time]
         );
-        res.status(201).send({ message: 'Availability added successfully' });
+        res.status(201).json({ success: true, message: 'Availability added successfully' });
     } catch (err) {
         console.error("Error saving availability:", err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ success: false, error: 'Failed to save availability' });
     }
 });
 
@@ -2500,16 +2511,20 @@ app.post('/api/billing/generate/:visit_id', authMiddleware, checkRole('nurse', '
 app.get('/api/billing/:id', authMiddleware, async (req, res) => {
     const id = parseInt(req.params.id);
 
+    if (isNaN(id)) {
+        return res.status(400).json({ success: false, error: 'Invalid billing ID' });
+    }
+
     try {
         const { rows } = await db.query(
             `SELECT b.*,
                     DATE(v.check_in_time) as visit_date, v.check_in_time, v.check_out_time as checkout_time,
                     p.dn, p.first_name_th, p.last_name_th, p.mobile_phone,
-                    di.full_name as doctor_name
+                    d.full_name as doctor_name
              FROM billing b
              JOIN visits v ON b.visit_id = v.visit_id
-             JOIN patients p ON b.patient_id = p.patient_id
-             LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
+             JOIN patients p ON v.patient_id = p.patient_id
+             LEFT JOIN doctors d ON v.doctor_id = d.doctor_id
              WHERE b.billing_id = $1`,
             [id]
         );
@@ -2545,7 +2560,8 @@ app.get('/api/billing/visit/:visit_id', authMiddleware, async (req, res) => {
             `SELECT b.*,
                     p.dn, p.first_name_th, p.last_name_th
              FROM billing b
-             JOIN patients p ON b.patient_id = p.patient_id
+             JOIN visits v ON b.visit_id = v.visit_id
+             JOIN patients p ON v.patient_id = p.patient_id
              WHERE b.visit_id = $1`,
             [visit_id]
         );
@@ -2609,10 +2625,10 @@ app.put('/api/billing/:id/payment', authMiddleware, checkRole('nurse', 'admin'),
 
         const { rows } = await db.query(
             `UPDATE billing
-             SET payment_method = $1, amount_paid = $2, paid_at = NOW(), payment_status = 'paid'
-             WHERE billing_id = $3
+             SET payment_method = $1, paid_at = NOW(), payment_status = 'paid'
+             WHERE billing_id = $2
              RETURNING *`,
-            [payment_method.toLowerCase(), amount, id]
+            [payment_method.toLowerCase(), id]
         );
 
         res.json(rows[0]);
@@ -2636,8 +2652,8 @@ app.get('/api/billing/pending', authMiddleware, checkRole('nurse', 'admin'), asy
                     p.dn, p.first_name_th, p.last_name_th
              FROM billing b
              JOIN visits v ON b.visit_id = v.visit_id
-             JOIN patients p ON b.patient_id = p.patient_id
-             WHERE v.clinic_id = $1 AND b.status = 'pending'
+             JOIN patients p ON v.patient_id = p.patient_id
+             WHERE v.clinic_id = $1 AND b.payment_status = 'pending'
              ORDER BY b.created_at DESC`,
             [clinic_id]
         );
@@ -2667,7 +2683,7 @@ app.get('/api/billing/history', authMiddleware, checkRole('admin'), async (req, 
                    p.dn, p.first_name_th, p.last_name_th
             FROM billing b
             JOIN visits v ON b.visit_id = v.visit_id
-            JOIN patients p ON b.patient_id = p.patient_id
+            JOIN patients p ON v.patient_id = p.patient_id
             WHERE v.clinic_id = $1
         `;
         const params = [clinic_id];
@@ -3029,14 +3045,13 @@ app.get('/api/operations/patient-log', authMiddleware, async (req, res) => {
                 p.first_name_en,
                 p.last_name_en,
                 p.mobile_phone,
-                di.full_name as doctor_name,
+                d.full_name as doctor_name,
                 COALESCE(b.total_amount, 0) as total_amount,
                 b.payment_status,
-                b.payment_method,
-                b.amount_paid
+                b.payment_method
             FROM visits v
             JOIN patients p ON v.patient_id = p.patient_id
-            LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
+            LEFT JOIN doctors d ON v.doctor_id = d.doctor_id
             LEFT JOIN billing b ON v.visit_id = b.visit_id
             WHERE v.clinic_id = $1
             AND DATE(v.check_in_time) BETWEEN $2 AND $3
@@ -3069,13 +3084,13 @@ app.get('/api/operations/export', authMiddleware, async (req, res) => {
                     p.dn as "Patient ID",
                     CONCAT(p.first_name_th, ' ', p.last_name_th) as "Patient Name",
                     TO_CHAR(v.check_in_time, 'YYYY-MM-DD HH24:MI') as "Check-in Time",
-                    di.full_name as "Doctor",
+                    d.full_name as "Doctor",
                     v.status as "Status",
                     COALESCE(b.total_amount, 0) as "Total Amount",
                     b.payment_status as "Payment Status"
                 FROM visits v
                 JOIN patients p ON v.patient_id = p.patient_id
-                LEFT JOIN doctors di ON v.doctor_id = di.doctor_id
+                LEFT JOIN doctors d ON v.doctor_id = d.doctor_id
                 LEFT JOIN billing b ON v.visit_id = b.visit_id
                 WHERE v.clinic_id = $1
                 AND DATE(v.check_in_time) BETWEEN $2 AND $3
@@ -3171,13 +3186,30 @@ app.get('/api/operations/export', authMiddleware, async (req, res) => {
 
 // GET compensation rules
 app.get('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
-    const { clinic_id } = req.query;
+    const clinic_id = parseInt(req.query.clinic_id);
 
-    if (!clinic_id) {
-        return res.status(400).json({ message: 'Clinic ID is required' });
+    if (isNaN(clinic_id)) {
+        return res.status(400).json({ success: false, error: 'Invalid clinic ID' });
     }
 
     try {
+        // Check if compensation_rules table exists
+        const tableCheck = await db.query(`
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public'
+                AND table_name = 'compensation_rules'
+            );
+        `);
+
+        if (!tableCheck.rows[0].exists) {
+            // Table doesn't exist yet, return default values
+            return res.json({
+                defaultRate: 50,
+                procedureRules: []
+            });
+        }
+
         // Get default rule
         const defaultRule = await db.query(
             `SELECT value FROM compensation_rules
@@ -3206,11 +3238,11 @@ app.get('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
 
 // PUT update compensation rules
 app.put('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
-    const { clinic_id } = req.query;
+    const clinic_id = parseInt(req.query.clinic_id);
     const { defaultRate, procedureRules } = req.body;
 
-    if (!clinic_id) {
-        return res.status(400).json({ message: 'Clinic ID is required' });
+    if (isNaN(clinic_id)) {
+        return res.status(400).json({ success: false, error: 'Invalid clinic ID' });
     }
 
     const client = await db.connect();
