@@ -457,10 +457,12 @@ app.post('/api/patients', authMiddleware, checkRole('nurse', 'doctor', 'admin'),
     }
 
     try {
+        const dobToInsert = date_of_birth || null;
+
         const { rows } = await db.query(
             `INSERT INTO patients (dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th, title_en, first_name_en, last_name_en, nickname, gender, date_of_birth, chronic_diseases, allergies, mobile_phone, home_phone, line_id, email, address, sub_district, district, province, country, zip_code)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25) RETURNING *`,
-            [dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th, title_en, first_name_en, last_name_en, nickname, gender, date_of_birth, chronic_diseases, allergies, mobile_phone, home_phone, line_id, email, address, sub_district, district, province, country, zip_code]
+            [dn, dn_old, id_verification_type, id_number, title_th, first_name_th, last_name_th, title_en, first_name_en, last_name_en, nickname, gender, dobToInsert, chronic_diseases, allergies, mobile_phone, home_phone, line_id, email, address, sub_district, district, province, country, zip_code]
         );
         res.status(201).json(rows[0]);
     } catch (err) {
@@ -792,7 +794,8 @@ app.get('/api/all-appointments', authMiddleware, async (req, res) => {
 
 app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
     const id = parseInt(req.params.id);
-    const { status, doctor_id, appointment_date, appointment_time, purpose, room_id, confirmation_notes } = req.body;
+    const { status: originalStatus, doctor_id, appointment_date, appointment_time, purpose, room_id, confirmation_notes } = req.body;
+    let status = originalStatus;
 
     // Use a database transaction to ensure data integrity
     const client = await db.pool.connect();
@@ -804,7 +807,7 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
         if (status && status.toLowerCase() === 'checked-in') {
             // Step 1: Get the appointment details we need to create a visit
             const appointmentRes = await client.query(
-                'SELECT patient_id, clinic_id, doctor_id FROM appointments WHERE appointment_id = $1',
+                'SELECT patient_id, clinic_id, doctor_id, room_id FROM appointments WHERE appointment_id = $1',
                 [id]
             );
 
@@ -812,20 +815,21 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
                 throw new Error('Appointment not found.');
             }
 
-            const { patient_id, clinic_id, doctor_id: assigned_doctor_id } = appointmentRes.rows[0];
+            const { patient_id, clinic_id, doctor_id: assigned_doctor_id, room_id: appt_room_id } = appointmentRes.rows[0];
 
             if (!patient_id) {
                 throw new Error('Cannot check-in. This appointment is not linked to a patient record.');
             }
 
-            // Step 2: Insert a new record into the `visits` table
-            // This places the patient into the live queue for the doctor
+            // Step 2: Insert a new record into the `visits` table WITH room_id
             await client.query(
-                `INSERT INTO visits (patient_id, clinic_id, doctor_id, appointment_id, check_in_time, status)
-                 VALUES ($1, $2, $3, $4, NOW(), 'waiting')
-                 ON CONFLICT (appointment_id) DO NOTHING`, // Prevents creating duplicate visits for the same appointment
-                [patient_id, clinic_id, assigned_doctor_id, id]
+                `INSERT INTO visits (patient_id, clinic_id, doctor_id, room_id, check_in_time, status)
+                 VALUES ($1, $2, $3, $4, NOW(), 'waiting')`,
+                [patient_id, clinic_id, assigned_doctor_id, appt_room_id]
             );
+
+            // Set the appointment status to Confirmed, as 'Checked-in' is not a valid status for appointments.
+            status = 'Confirmed';
         }
 
         // --- The original logic to update the appointments table ---
@@ -983,8 +987,8 @@ app.post('/api/appointments', authMiddleware, checkRole('nurse', 'doctor', 'admi
     }
 
     // Validate status (if provided)
-    const validStatuses = ['pending_confirmation', 'confirmed', 'checked-in', 'completed', 'cancelled'];
-    if (status && !validStatuses.includes(status.toLowerCase())) {
+    const validStatuses = ['Confirmed', 'Pending', 'Cancelled', 'Completed', 'No-Show'];
+    if (status && !validStatuses.includes(status)) {
         return res.status(400).json({ msg: 'Invalid appointment status.' });
     }
 
@@ -995,7 +999,7 @@ app.post('/api/appointments', authMiddleware, checkRole('nurse', 'doctor', 'admi
         const { rows } = await db.query(
             `INSERT INTO appointments (customer_id, patient_id, doctor_id, clinic_id, appointment_time, end_time, status, patient_name_at_booking, patient_phone_at_booking, purpose, room_id)
              VALUES ($1, $2, $3, $4, $5, $5::timestamptz + ($6 * interval '1 minute'), $7, $8, $9, $10, $11) RETURNING *`,
-            [customer_id || null, patient_id || null, doctor_id, clinic_id, appointmentTimestamp, duration, status || 'confirmed', patient_name_at_booking, patient_phone_at_booking, purpose || null, room_id || null]
+            [customer_id || null, patient_id || null, doctor_id, clinic_id, appointmentTimestamp, duration, status || 'Confirmed', patient_name_at_booking, patient_phone_at_booking, purpose || null, room_id || null]
         );
         res.status(201).json(rows[0]);
     } catch (err) {
@@ -1102,33 +1106,34 @@ app.post('/api/examination-findings', authMiddleware, async (req, res) => {
     }
 });
 
-// POST a new treatment plan and its items
-app.post('/api/treatment-plans', authMiddleware, async (req, res) => {
-    const { patient_id, doctor_id, status, notes, items } = req.body;
-    const client = await db.pool.connect();
-    try {
-        await client.query('BEGIN');
-        const planResult = await client.query(
-            'INSERT INTO treatment_plans (patient_id, doctor_id, status, notes) VALUES ($1, $2, $3, $4) RETURNING plan_id',
-            [patient_id, doctor_id, status, notes]
-        );
-        const planId = planResult.rows[0].plan_id;
+// POST a new treatment plan and its items - DEPRECATED (use the one at line 2004 instead)
+// This endpoint is commented out to avoid conflicts
+// app.post('/api/treatment-plans', authMiddleware, async (req, res) => {
+//     const { patient_id, doctor_id, status, notes, items } = req.body;
+//     const client = await db.pool.connect();
+//     try {
+//         await client.query('BEGIN');
+//         const planResult = await client.query(
+//             'INSERT INTO treatment_plans (patient_id, doctor_id, status, notes) VALUES ($1, $2, $3, $4) RETURNING plan_id',
+//             [patient_id, doctor_id, status, notes]
+//         );
+//         const planId = planResult.rows[0].plan_id;
 
-        for (const item of items) {
-            await client.query(
-                'INSERT INTO treatment_items (plan_id, description, priority, status) VALUES ($1, $2, $3, $4)',
-                [planId, item.description, item.priority, item.status]
-            );
-        }
-        await client.query('COMMIT');
-        res.status(201).json({ plan_id: planId });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        res.status(500).json({ error: err.message });
-    } finally {
-        client.release();
-    }
-});
+//         for (const item of items) {
+//             await client.query(
+//                 'INSERT INTO treatment_items (plan_id, description, priority, status) VALUES ($1, $2, $3, $4)',
+//                 [planId, item.description, item.priority, item.status]
+//             );
+//         }
+//         await client.query('COMMIT');
+//         res.status(201).json({ plan_id: planId });
+//     } catch (err) {
+//         await client.query('ROLLBACK');
+//         res.status(500).json({ error: err.message });
+//     } finally {
+//         client.release();
+//     }
+// });
 
 // PUT to update a treatment item's status or progress
 app.put('/api/treatment-items/:itemId', authMiddleware, async (req, res) => {
@@ -1433,7 +1438,7 @@ app.get('/api/debug/checked-in-appointments', authMiddleware, async (req, res) =
 
 // POST check-in patient (nurse/admin only)
 app.post('/api/visits/check-in', authMiddleware, checkRole('nurse', 'admin'), async (req, res) => {
-    const { patient_id, clinic_id, chief_complaint } = req.body;
+    const { patient_id, clinic_id, chief_complaint, appointment_id } = req.body;
 
     // Validation
     if (!patient_id || !clinic_id) {
@@ -1451,12 +1456,24 @@ app.post('/api/visits/check-in', authMiddleware, checkRole('nurse', 'admin'), as
             return res.status(404).json({ message: 'Patient not found' });
         }
 
-        // Create visit with status 'waiting'
+        // Get room_id from appointment if provided
+        let room_id = null;
+        if (appointment_id) {
+            const appointmentCheck = await db.query(
+                'SELECT room_id, doctor_id FROM appointments WHERE appointment_id = $1',
+                [appointment_id]
+            );
+            if (appointmentCheck.rows.length > 0) {
+                room_id = appointmentCheck.rows[0].room_id;
+            }
+        }
+
+        // Create visit with status 'waiting' and room_id
         const { rows } = await db.query(
-            `INSERT INTO visits (patient_id, clinic_id, check_in_time, status)
-             VALUES ($1, $2, NOW(), 'waiting')
+            `INSERT INTO visits (patient_id, clinic_id, room_id, check_in_time, status)
+             VALUES ($1, $2, $3, NOW(), 'waiting')
              RETURNING *`,
-            [patient_id, clinic_id]
+            [patient_id, clinic_id, room_id]
         );
 
         res.status(201).json(rows[0]);
@@ -1468,6 +1485,10 @@ app.post('/api/visits/check-in', authMiddleware, checkRole('nurse', 'admin'), as
 // GET visits with optional status filter (for Counter page)
 app.get('/api/visits', authMiddleware, async (req, res) => {
     const { clinic_id, status } = req.query;
+
+    console.log('=== GET /api/visits ===');
+    console.log('clinic_id:', clinic_id);
+    console.log('status:', status);
 
     if (!clinic_id) {
         return res.status(400).json({ message: 'Clinic ID is required' });
@@ -1496,7 +1517,22 @@ app.get('/api/visits', authMiddleware, async (req, res) => {
 
         query += ` ORDER BY v.check_in_time DESC`;
 
+        console.log('Query:', query);
+        console.log('Params:', params);
+
         const { rows } = await db.query(query, params);
+        console.log('Found', rows.length, 'visits');
+        if (rows.length > 0) {
+            console.log('Sample visit:', rows[0]);
+        }
+
+        // Also query all visits for this clinic to see what statuses exist
+        const allVisits = await db.query(
+            'SELECT visit_id, status FROM visits WHERE clinic_id = $1 ORDER BY visit_id DESC LIMIT 10',
+            [clinic_id]
+        );
+        console.log('All recent visits for clinic:', allVisits.rows);
+
         res.json(rows);
     } catch (err) {
         handleError(res, err, 'Failed to fetch visits');
@@ -1998,23 +2034,55 @@ app.get('/api/examinations/:id', authMiddleware, async (req, res) => {
 
 // POST create treatment plan (doctor/admin only)
 app.post('/api/treatment-plans', authMiddleware, checkRole('doctor', 'admin'), async (req, res) => {
-    const { visit_id, notes, status } = req.body;
+    const { visit_id, patient_id, doctor_id, notes, status } = req.body;
+
+    console.log('=== CREATE TREATMENT PLAN ===');
+    console.log('Request body:', req.body);
+    console.log('User:', req.user);
 
     // Validation
     if (!visit_id) {
+        console.log('ERROR: Visit ID is missing');
         return res.status(400).json({ message: 'Visit ID is required' });
     }
 
     try {
-        // Get patient_id from visit
-        const visitCheck = await db.query(
-            'SELECT patient_id FROM visits WHERE visit_id = $1',
-            [visit_id]
-        );
+        // Get patient_id from visit if not provided
+        let finalPatientId = patient_id;
 
-        if (visitCheck.rows.length === 0) {
-            return res.status(404).json({ message: 'Visit not found' });
+        if (!finalPatientId) {
+            console.log('Patient ID not provided, looking up from visit_id:', visit_id);
+            const visitCheck = await db.query(
+                'SELECT patient_id FROM visits WHERE visit_id = $1',
+                [visit_id]
+            );
+
+            if (visitCheck.rows.length === 0) {
+                console.log('ERROR: Visit not found for visit_id:', visit_id);
+                return res.status(404).json({ message: 'Visit not found' });
+            }
+
+            finalPatientId = visitCheck.rows[0].patient_id;
+            console.log('Patient ID from visit:', finalPatientId);
+        } else {
+            console.log('Patient ID provided in request:', finalPatientId);
         }
+
+        if (!finalPatientId) {
+            console.log('ERROR: Patient ID is null');
+            return res.status(400).json({ message: 'Patient ID is required' });
+        }
+
+        // Get doctor_id from request or auth user
+        let finalDoctorId = doctor_id || req.user?.id;
+        console.log('Doctor ID:', finalDoctorId);
+
+        if (!finalDoctorId) {
+            console.log('ERROR: Doctor ID is null');
+            return res.status(400).json({ message: 'Doctor ID is required' });
+        }
+
+        console.log('Inserting treatment plan with status:', status || 'Active');
 
         const { rows } = await db.query(
             `INSERT INTO treatment_plans
@@ -2023,15 +2091,19 @@ app.post('/api/treatment-plans', authMiddleware, checkRole('doctor', 'admin'), a
              RETURNING *`,
             [
                 visit_id,
-                visitCheck.rows[0].patient_id,
-                req.user.id,
-                status || 'active',
+                finalPatientId,
+                finalDoctorId,
+                status || 'Active',
                 notes || null
             ]
         );
 
+        console.log('Treatment plan created successfully:', rows[0]);
         res.status(201).json(rows[0]);
     } catch (err) {
+        console.error('ERROR creating treatment plan:', err);
+        console.error('Error details:', err.message);
+        console.error('Error stack:', err.stack);
         handleError(res, err, 'Failed to create treatment plan');
     }
 });
@@ -2149,12 +2221,425 @@ app.delete('/api/treatment-plans/:id', authMiddleware, checkRole('doctor', 'admi
 });
 
 // =====================================================================
+// GROUP 4.5: ROOM MANAGEMENT API
+// =====================================================================
+
+// GET all rooms for a clinic with current patients (AUTOMATIC WORKFLOW)
+app.get('/api/rooms', authMiddleware, async (req, res) => {
+    const { clinic_id } = req.query;
+
+    console.log('=== GET /api/rooms ===');
+    console.log('clinic_id:', clinic_id);
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        // Get all rooms for this clinic
+        const roomsQuery = await db.query(`
+            SELECT
+                r.room_id,
+                r.room_name,
+                r.clinic_id
+            FROM rooms r
+            WHERE r.clinic_id = $1
+            ORDER BY r.room_name
+        `, [clinic_id]);
+
+        console.log('Rooms found:', roomsQuery.rows.length);
+        console.log('Rooms:', JSON.stringify(roomsQuery.rows, null, 2));
+
+        // Get all today's visits for each room
+        const visitsQuery = await db.query(`
+            SELECT
+                v.visit_id,
+                v.patient_id,
+                v.doctor_id,
+                v.room_id,
+                v.check_in_time,
+                v.status,
+                p.first_name_th || ' ' || p.last_name_th as patient_name_th,
+                p.first_name_en || ' ' || p.last_name_en as patient_name_en,
+                p.dn,
+                d.full_name as doctor_name,
+                d.color as doctor_color
+            FROM visits v
+            JOIN patients p ON v.patient_id = p.patient_id
+            LEFT JOIN doctors d ON v.doctor_id = d.doctor_id
+            WHERE v.clinic_id = $1
+            AND v.room_id IS NOT NULL
+            AND DATE(v.check_in_time) = CURRENT_DATE
+            AND v.status IN ('waiting', 'Queue', 'in_progress')
+            ORDER BY v.check_in_time
+        `, [clinic_id]);
+
+        console.log('Visits found:', visitsQuery.rows.length);
+        console.log('Visits:', JSON.stringify(visitsQuery.rows, null, 2));
+
+        // Combine data - organize visits by room
+        const rooms = roomsQuery.rows.map(room => {
+            // Get visits for this room
+            const roomVisits = visitsQuery.rows.filter(v => v.room_id === room.room_id);
+
+            // Separate waiting patients and in-progress patient
+            const waitingPatients = roomVisits.filter(v => v.status === 'waiting' || v.status === 'Queue');
+            const inProgressVisit = roomVisits.find(v => v.status === 'in_progress');
+
+            // Determine room status
+            let status = 'Available';
+            let current_session = null;
+
+            if (inProgressVisit) {
+                status = 'In Use';
+                current_session = {
+                    visit_id: inProgressVisit.visit_id,
+                    patient_id: inProgressVisit.patient_id,
+                    patient_name: inProgressVisit.patient_name_th || inProgressVisit.patient_name_en || inProgressVisit.dn,
+                    doctor_id: inProgressVisit.doctor_id,
+                    doctor_name: inProgressVisit.doctor_name,
+                    session_start_time: inProgressVisit.check_in_time
+                };
+            } else if (waitingPatients.length > 0) {
+                status = 'Waiting';
+            }
+
+            return {
+                room_id: room.room_id,
+                room_name: room.room_name,
+                status: status,
+                current_session: current_session,
+                queue: waitingPatients.map((v, index) => ({
+                    visit_id: v.visit_id,
+                    patient_id: v.patient_id,
+                    patient_name: v.patient_name_th || v.patient_name_en || v.dn,
+                    dn: v.dn,
+                    position: index + 1,
+                    added_at: v.check_in_time,
+                    wait_minutes: Math.floor((Date.now() - new Date(v.check_in_time).getTime()) / 60000),
+                    doctor_assigned: v.doctor_name
+                }))
+            };
+        });
+
+        console.log('Final rooms response:', JSON.stringify(rooms, null, 2));
+        console.log('Total rooms being returned:', rooms.length);
+
+        res.json(rooms);
+    } catch (err) {
+        console.error('Error in /api/rooms:', err);
+        handleError(res, err, 'Failed to fetch rooms');
+    }
+});
+
+// GET available doctors not in any active session
+app.get('/api/rooms/available-doctors', authMiddleware, async (req, res) => {
+    const { clinic_id } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        const query = await db.query(`
+            SELECT
+                d.doctor_id as id,
+                d.full_name as name,
+                d.specialty,
+                d.color
+            FROM doctors d
+            JOIN doctor_clinic_assignments dca ON d.doctor_id = dca.doctor_id
+            WHERE dca.clinic_id = $1
+            AND d.status = 'active'
+            AND d.doctor_id NOT IN (
+                SELECT doctor_id FROM room_sessions WHERE status = 'Active'
+            )
+            ORDER BY d.full_name
+        `, [clinic_id]);
+
+        res.json(query.rows);
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch available doctors');
+    }
+});
+
+// POST create a new room
+app.post('/api/rooms', authMiddleware, checkRole('admin', 'nurse'), async (req, res) => {
+    const { clinic_id, room_name, room_number, resources } = req.body;
+
+    if (!clinic_id || !room_name) {
+        return res.status(400).json({ message: 'Clinic ID and room name are required' });
+    }
+
+    try {
+        const { rows } = await db.query(`
+            INSERT INTO clinic_rooms (clinic_id, room_name, room_number, resources, status)
+            VALUES ($1, $2, $3, $4, 'Available')
+            RETURNING *
+        `, [clinic_id, room_name, room_number || null, resources || []]);
+
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        if (err.code === '23505') { // Unique violation
+            return res.status(400).json({ message: 'Room name already exists in this clinic' });
+        }
+        handleError(res, err, 'Failed to create room');
+    }
+});
+
+// PUT update room status (for manual status changes like marking as ready after cleaning)
+app.put('/api/rooms/:room_id/status', authMiddleware, checkRole('admin', 'nurse'), async (req, res) => {
+    const { room_id } = req.params;
+    const { status } = req.body;
+
+    if (!status) {
+        return res.status(400).json({ message: 'Status is required' });
+    }
+
+    const validStatuses = ['Available', 'In Use', 'Needs Cleaning', 'Out of Service'];
+    if (!validStatuses.includes(status)) {
+        return res.status(400).json({ message: 'Invalid status value' });
+    }
+
+    try {
+        const { rows } = await db.query(`
+            UPDATE clinic_rooms
+            SET status = $1, updated_at = NOW()
+            WHERE room_id = $2
+            RETURNING *
+        `, [status, room_id]);
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Room not found' });
+        }
+
+        res.json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to update room status');
+    }
+});
+
+// POST start a session (assign doctor and patient to room)
+app.post('/api/rooms/:room_id/start-session', authMiddleware, checkRole('admin', 'nurse'), async (req, res) => {
+    const { room_id } = req.params;
+    const { doctor_id, patient_id, visit_id, patient_name } = req.body;
+
+    if (!doctor_id) {
+        return res.status(400).json({ message: 'Doctor ID is required' });
+    }
+
+    try {
+        await db.query('BEGIN');
+
+        // Check if room is available
+        const roomCheck = await db.query(
+            'SELECT status FROM clinic_rooms WHERE room_id = $1',
+            [room_id]
+        );
+
+        if (roomCheck.rows.length === 0) {
+            await db.query('ROLLBACK');
+            return res.status(404).json({ message: 'Room not found' });
+        }
+
+        if (roomCheck.rows[0].status !== 'Available') {
+            await db.query('ROLLBACK');
+            return res.status(400).json({ message: 'Room is not available' });
+        }
+
+        // Check if doctor is already in a session
+        const doctorCheck = await db.query(
+            'SELECT session_id FROM room_sessions WHERE doctor_id = $1 AND status = $2',
+            [doctor_id, 'Active']
+        );
+
+        if (doctorCheck.rows.length > 0) {
+            await db.query('ROLLBACK');
+            return res.status(400).json({ message: 'Doctor is already in an active session' });
+        }
+
+        // Create session
+        const { rows } = await db.query(`
+            INSERT INTO room_sessions (room_id, doctor_id, patient_id, visit_id, status)
+            VALUES ($1, $2, $3, $4, 'Active')
+            RETURNING *
+        `, [room_id, doctor_id, patient_id || null, visit_id || null]);
+
+        await db.query('COMMIT');
+
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        await db.query('ROLLBACK');
+        handleError(res, err, 'Failed to start session');
+    }
+});
+
+// PUT end a session (mark as completed, room goes to "Needs Cleaning")
+app.put('/api/rooms/:room_id/end-session', authMiddleware, checkRole('admin', 'nurse', 'doctor'), async (req, res) => {
+    const { room_id } = req.params;
+
+    try {
+        await db.query('BEGIN');
+
+        // Find active session for this room
+        const sessionQuery = await db.query(`
+            SELECT session_id FROM room_sessions
+            WHERE room_id = $1 AND status = 'Active'
+        `, [room_id]);
+
+        if (sessionQuery.rows.length === 0) {
+            await db.query('ROLLBACK');
+            return res.status(404).json({ message: 'No active session found for this room' });
+        }
+
+        const session_id = sessionQuery.rows[0].session_id;
+
+        // End the session
+        const { rows } = await db.query(`
+            UPDATE room_sessions
+            SET status = 'Completed', session_end_time = NOW()
+            WHERE session_id = $1
+            RETURNING *
+        `, [session_id]);
+
+        // Clear queue for this room
+        await db.query('DELETE FROM room_queue WHERE room_id = $1', [room_id]);
+
+        await db.query('COMMIT');
+
+        res.json(rows[0]);
+    } catch (err) {
+        await db.query('ROLLBACK');
+        handleError(res, err, 'Failed to end session');
+    }
+});
+
+// POST add patient to room queue
+app.post('/api/rooms/:room_id/queue', authMiddleware, checkRole('admin', 'nurse'), async (req, res) => {
+    const { room_id } = req.params;
+    const { patient_id, visit_id, priority } = req.body;
+
+    if (!patient_id) {
+        return res.status(400).json({ message: 'Patient ID is required' });
+    }
+
+    try {
+        // Get next queue position
+        const positionQuery = await db.query(`
+            SELECT COALESCE(MAX(queue_position), 0) + 1 as next_position
+            FROM room_queue WHERE room_id = $1
+        `, [room_id]);
+
+        const next_position = positionQuery.rows[0].next_position;
+
+        const { rows } = await db.query(`
+            INSERT INTO room_queue (room_id, patient_id, visit_id, queue_position, priority)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+        `, [room_id, patient_id, visit_id || null, next_position, priority || 'Normal']);
+
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        handleError(res, err, 'Failed to add patient to queue');
+    }
+});
+
+// DELETE remove patient from room queue
+app.delete('/api/rooms/queue/:queue_id', authMiddleware, checkRole('admin', 'nurse'), async (req, res) => {
+    const { queue_id } = req.params;
+
+    try {
+        await db.query('BEGIN');
+
+        // Get queue info before deleting
+        const queueInfo = await db.query(
+            'SELECT room_id, queue_position FROM room_queue WHERE queue_id = $1',
+            [queue_id]
+        );
+
+        if (queueInfo.rows.length === 0) {
+            await db.query('ROLLBACK');
+            return res.status(404).json({ message: 'Queue entry not found' });
+        }
+
+        const { room_id, queue_position } = queueInfo.rows[0];
+
+        // Delete the queue entry
+        await db.query('DELETE FROM room_queue WHERE queue_id = $1', [queue_id]);
+
+        // Reorder remaining queue positions
+        await db.query(`
+            UPDATE room_queue
+            SET queue_position = queue_position - 1
+            WHERE room_id = $1 AND queue_position > $2
+        `, [room_id, queue_position]);
+
+        await db.query('COMMIT');
+
+        res.json({ message: 'Patient removed from queue successfully' });
+    } catch (err) {
+        await db.query('ROLLBACK');
+        handleError(res, err, 'Failed to remove patient from queue');
+    }
+});
+
+// GET room statistics for KPI bar
+app.get('/api/rooms/stats', authMiddleware, async (req, res) => {
+    const { clinic_id } = req.query;
+
+    if (!clinic_id) {
+        return res.status(400).json({ message: 'Clinic ID is required' });
+    }
+
+    try {
+        // Total patients today
+        const totalPatientsQuery = await db.query(`
+            SELECT COUNT(*) as count
+            FROM visits
+            WHERE clinic_id = $1
+            AND DATE(check_in_time) = CURRENT_DATE
+        `, [clinic_id]);
+
+        // Average wait time (from queue)
+        const avgWaitQuery = await db.query(`
+            SELECT AVG(EXTRACT(EPOCH FROM (NOW() - added_to_queue_at)) / 60) as avg_wait_minutes
+            FROM room_queue rq
+            JOIN clinic_rooms cr ON rq.room_id = cr.room_id
+            WHERE cr.clinic_id = $1
+        `, [clinic_id]);
+
+        // Rooms in use
+        const roomsInUseQuery = await db.query(`
+            SELECT COUNT(*) as count
+            FROM clinic_rooms
+            WHERE clinic_id = $1 AND status = 'In Use'
+        `, [clinic_id]);
+
+        // Rooms needing cleaning
+        const cleaningQueueQuery = await db.query(`
+            SELECT COUNT(*) as count
+            FROM clinic_rooms
+            WHERE clinic_id = $1 AND status = 'Needs Cleaning'
+        `, [clinic_id]);
+
+        res.json({
+            totalPatients: parseInt(totalPatientsQuery.rows[0].count) || 0,
+            avgWaitTime: Math.round(parseFloat(avgWaitQuery.rows[0].avg_wait_minutes) || 0),
+            roomsInUse: parseInt(roomsInUseQuery.rows[0].count) || 0,
+            cleaningQueue: parseInt(cleaningQueueQuery.rows[0].count) || 0
+        });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch room statistics');
+    }
+});
+
+// =====================================================================
 // GROUP 5: VISIT TREATMENTS API
 // =====================================================================
 
 // POST add treatment to visit (doctor/nurse/admin)
 app.post('/api/visit-treatments', authMiddleware, checkRole('doctor', 'nurse', 'admin'), async (req, res) => {
-    const { visit_id, treatment_id, custom_price, tooth_numbers, notes } = req.body;
+    const { visit_id, treatment_id, custom_price, tooth_numbers, notes, status } = req.body;
 
     // Validation
     if (!visit_id || !treatment_id) {
@@ -2186,10 +2671,10 @@ app.post('/api/visit-treatments', authMiddleware, checkRole('doctor', 'nurse', '
 
         const { rows } = await db.query(
             `INSERT INTO visit_treatments
-             (visit_id, treatment_id, actual_price, tooth_numbers, notes)
-             VALUES ($1, $2, $3, $4, $5)
+             (visit_id, treatment_id, actual_price, tooth_numbers, notes, status)
+             VALUES ($1, $2, $3, $4, $5, $6)
              RETURNING *`,
-            [visit_id, treatment_id, price, tooth_numbers || '', notes || '']
+            [visit_id, treatment_id, price, tooth_numbers || '', notes || '', status || 'Pending']
         );
 
         res.status(201).json(rows[0]);
@@ -2504,6 +2989,106 @@ app.post('/api/billing/generate/:visit_id', authMiddleware, checkRole('nurse', '
         res.status(201).json(rows[0]);
     } catch (err) {
         handleError(res, err, 'Failed to generate bill');
+    }
+});
+
+// GET compensation rules
+app.get('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
+    const clinic_id = parseInt(req.query.clinic_id);
+
+    if (isNaN(clinic_id)) {
+        return res.status(400).json({ success: false, error: 'Invalid clinic ID' });
+    }
+
+    try {
+        // Check if compensation_rule table exists
+        const tableCheck = await db.query(`
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public'
+                AND table_name = 'compensation_rule'
+            );
+        `);
+
+        if (!tableCheck.rows[0].exists) {
+            // Table doesn't exist yet, return default values
+            return res.json({
+                defaultRate: 50,
+                procedureRules: []
+            });
+        }
+
+        // Get default rule
+        const defaultRule = await db.query(
+            `SELECT compensation_value as value FROM compensation_rule
+             WHERE clinic_id = $1 AND treatment_category = 'default'
+             LIMIT 1`,
+            [clinic_id]
+        );
+
+        // Get procedure-specific rules
+        const procedureRules = await db.query(
+            `SELECT compensation_id as rule_id, treatment_id, compensation_type, compensation_value as value
+             FROM compensation_rule
+             WHERE clinic_id = $1 AND compensation_type != 'default'
+             ORDER BY compensation_id`,
+            [clinic_id]
+        );
+
+        res.json({
+            defaultRate: defaultRule.rows[0]?.value || 50,
+            procedureRules: procedureRules.rows
+        });
+    } catch (err) {
+        handleError(res, err, 'Failed to fetch compensation rules');
+    }
+});
+
+// PUT update compensation rules
+app.put('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
+    const clinic_id = parseInt(req.query.clinic_id);
+    const { defaultRate, procedureRules } = req.body;
+
+    if (isNaN(clinic_id)) {
+        return res.status(400).json({ success: false, error: 'Invalid clinic ID' });
+    }
+
+    const client = await db.pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        // Delete existing rules for this clinic
+        await client.query(
+            'DELETE FROM compensation_rule WHERE clinic_id = $1',
+            [clinic_id]
+        );
+
+        // Insert default rule
+        await client.query(
+            `INSERT INTO compensation_rule (clinic_id, treatment_category, compensation_type, compensation_value, rule_type)
+             VALUES ($1, 'default', 'percentage', $2, 'percentage')`,
+            [clinic_id, defaultRate]
+        );
+
+        // Insert procedure-specific rules
+        for (const rule of procedureRules) {
+            if (rule.treatment_id) {
+                await client.query(
+                    `INSERT INTO compensation_rule (clinic_id, treatment_id, compensation_type, compensation_value, rule_type)
+                     VALUES ($1, $2, $3, $4, $5)`,
+                    [clinic_id, rule.treatment_id, rule.compensation_type, rule.value, rule.rule_type]
+                );
+            }
+        }
+
+        await client.query('COMMIT');
+        res.json({ message: 'Compensation rules updated successfully' });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        handleError(res, err, 'Failed to update compensation rules');
+    } finally {
+        client.release();
     }
 });
 
@@ -3184,106 +3769,6 @@ app.get('/api/operations/export', authMiddleware, async (req, res) => {
 // DOCTOR PAYROLL & FINANCIAL REPORTING API ENDPOINTS
 // =====================================================================
 
-// GET compensation rules
-app.get('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
-    const clinic_id = parseInt(req.query.clinic_id);
-
-    if (isNaN(clinic_id)) {
-        return res.status(400).json({ success: false, error: 'Invalid clinic ID' });
-    }
-
-    try {
-        // Check if compensation_rule table exists
-        const tableCheck = await db.query(`
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_name = 'compensation_rule'
-            );
-        `);
-
-        if (!tableCheck.rows[0].exists) {
-            // Table doesn't exist yet, return default values
-            return res.json({
-                defaultRate: 50,
-                procedureRules: []
-            });
-        }
-
-        // Get default rule
-        const defaultRule = await db.query(
-            `SELECT value FROM compensation_rule
-             WHERE clinic_id = $1 AND rule_type = 'default'
-             LIMIT 1`,
-            [clinic_id]
-        );
-
-        // Get procedure-specific rules
-        const procedureRules = await db.query(
-            `SELECT rule_id, treatment_id, rule_type, value
-             FROM compensation_rule
-             WHERE clinic_id = $1 AND rule_type != 'default'
-             ORDER BY rule_id`,
-            [clinic_id]
-        );
-
-        res.json({
-            defaultRate: defaultRule.rows[0]?.value || 50,
-            procedureRules: procedureRules.rows
-        });
-    } catch (err) {
-        handleError(res, err, 'Failed to fetch compensation rules');
-    }
-});
-
-// PUT update compensation rules
-app.put('/api/billing/compensation-rules', authMiddleware, async (req, res) => {
-    const clinic_id = parseInt(req.query.clinic_id);
-    const { defaultRate, procedureRules } = req.body;
-
-    if (isNaN(clinic_id)) {
-        return res.status(400).json({ success: false, error: 'Invalid clinic ID' });
-    }
-
-    const client = await db.connect();
-
-    try {
-        await client.query('BEGIN');
-
-        // Delete existing rules for this clinic
-        await client.query(
-            'DELETE FROM compensation_rule WHERE clinic_id = $1',
-            [clinic_id]
-        );
-
-        // Insert default rule
-        await client.query(
-            `INSERT INTO compensation_rule (clinic_id, treatment_id, rule_type, value)
-             VALUES ($1, NULL, 'default', $2)`,
-            [clinic_id, defaultRate]
-        );
-
-        // Insert procedure-specific rules
-        for (const rule of procedureRules) {
-            if (rule.treatment_id) {
-                await client.query(
-                    `INSERT INTO compensation_rule (clinic_id, treatment_id, rule_type, value)
-                     VALUES ($1, $2, $3, $4)`,
-                    [clinic_id, rule.treatment_id, rule.rule_type, rule.value]
-                );
-            }
-        }
-
-        await client.query('COMMIT');
-        res.json({ message: 'Compensation rules updated successfully' });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        handleError(res, err, 'Failed to update compensation rules');
-    } finally {
-        client.release();
-    }
-});
-
 // GET payroll report
 app.get('/api/billing/payroll-report', authMiddleware, async (req, res) => {
     const { clinic_id, start_date, end_date, doctor_ids } = req.query;
@@ -3296,7 +3781,7 @@ app.get('/api/billing/payroll-report', authMiddleware, async (req, res) => {
         // Get compensation rules
         const rulesResult = await db.query(
             `SELECT treatment_id, rule_type, value
-             FROM compensation_rules
+             FROM compensation_rule
              WHERE clinic_id = $1`,
             [clinic_id]
         );
@@ -3418,7 +3903,7 @@ app.get('/api/billing/export-excel', authMiddleware, async (req, res) => {
         // Get compensation rules
         const rulesResult = await db.query(
             `SELECT treatment_id, rule_type, value
-             FROM compensation_rules
+             FROM compensation_rule
              WHERE clinic_id = $1`,
             [clinic_id]
         );
@@ -3583,7 +4068,7 @@ app.get('/api/billing/doctor-summaries-pdf', authMiddleware, async (req, res) =>
         // Get compensation rules
         const rulesResult = await db.query(
             `SELECT treatment_id, rule_type, value
-             FROM compensation_rules
+             FROM compensation_rule
              WHERE clinic_id = $1`,
             [clinic_id]
         );
