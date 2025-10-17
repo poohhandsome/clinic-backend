@@ -31,23 +31,27 @@ app.use(helmet({
 }));
 
 // Configure CORS to allow requests from your frontend domains
-const allowedOrigins = [
+// Allow configuring a comma-separated list via ALLOWED_ORIGINS
+const allowedOriginsList = [
     'http://localhost:5173',
-    'https://dashboard.newtrenddental.com',
-    process.env.FRONTEND_URL
+    process.env.FRONTEND_URL,
+    ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()) : [])
 ].filter(Boolean);
+
+const allowedOrigins = new Set(allowedOriginsList);
 
 const corsOptions = {
     origin: function (origin, callback) {
         // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin) return callback(null, true);
 
-        if (allowedOrigins.indexOf(origin) !== -1) {
-            callback(null, true);
-        } else {
-            console.log('Blocked by CORS:', origin);
-            callback(new Error('Not allowed by CORS'));
+        // Exact match policy for safety
+        if (allowedOrigins.has(origin)) {
+            return callback(null, true);
         }
+
+        console.warn('Blocked by CORS:', origin, '\nAllowed:', Array.from(allowedOrigins).join(', '));
+        return callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
     optionsSuccessStatus: 200,
@@ -56,6 +60,9 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+
+// Log allowed origins at startup for visibility
+console.log('CORS allowed origins:', Array.from(allowedOrigins));
 app.use(express.json());
 
 // --- Force HTTPS in Production ---
@@ -67,6 +74,25 @@ if (process.env.NODE_ENV === 'production') {
         next();
     });
 }
+
+// --- Required environment validation ---
+(() => {
+    const missing = [];
+    if (!process.env.DATABASE_URL) missing.push('DATABASE_URL');
+    if (!process.env.JWT_SECRET) missing.push('JWT_SECRET');
+    if (missing.length) {
+        console.error('FATAL: Missing required environment variables:', missing.join(', '));
+        // Fail fast in production to avoid hard-to-debug runtime errors
+        if (process.env.NODE_ENV === 'production') {
+            process.exit(1);
+        }
+    }
+})();
+
+// --- Health endpoint ---
+app.get('/api/health', (req, res) => {
+    res.json({ ok: true, env: process.env.NODE_ENV || 'development' });
+});
 
 // --- Rate Limiting Configuration ---
 // Rate limiter for login attempts
